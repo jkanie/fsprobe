@@ -43,6 +43,8 @@ Run the tests:
 cargo test
 ```
 
+On every push and pull request, GitHub Actions runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` on Linux, Windows, macOS with Rust 1.97.0 (see [.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
 ## Options
 
 ```text

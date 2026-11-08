@@ -62,10 +62,10 @@ Planned work after the seed, with an hour estimate per item. The total is 30 hou
 - What: a repeatable benchmark that builds a tree of 100,000 files plus a 10 GB zip, then times a cold run, a warm run, a run with the cache.
 - Why: speed claims need numbers. The benchmark also catches a slow-down before a release instead of after.
 
-## 13. CI on Linux, Windows, macOS, 1.5 hours
+## 13. Symbolic links, 1.5 hours
 
-- What: a CI workflow that runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` on all 3 platforms.
-- Why: the cloud check only compiles on Windows and the path handling differs per platform. Only a run on each platform proves each build.
+- What: list each symbolic link in its own section, with the path it points to, and add `--follow-links` to compare what the link points to instead, guarded against link loops.
+- Why: today, a link is skipped without a word. A folder that holds a link at `a.txt` therefore shows `a.txt` as only on the other side, with no hint that a link sits there.
 
 ## 14. Release v0.1.0, 2 hours
 
