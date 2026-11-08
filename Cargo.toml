@@ -1,0 +1,19 @@
+[package]
+name = "fsprobe"
+version = "0.1.0"
+edition = "2021"
+description = "Compare 2 trees (folders or .zip files) by relative path, size, CRC-32, without extracting zips."
+license = "MIT"
+readme = "README.md"
+keywords = ["diff", "compare", "zip", "backup", "crc32"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
+crc32fast = "1.5.4"
+regex = "1.13.1"
+serde_json = "1.0.154"
+walkdir = "2.5.0"
+zip = { version = "9.4.2", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.27.0"
