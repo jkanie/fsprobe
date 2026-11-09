@@ -3,6 +3,9 @@
 //! Each side is a folder or a `.zip` file. Folders are walked recursively.
 //! Zip files are read from their central directory only: names, sizes and
 //! stored CRC-32 values, with no entry ever extracted.
+//!
+//! For 2 folder files of equal size, `--hash blake3` compares BLAKE3 digests
+//! and `--verify` compares the bytes themselves.
 
 use std::collections::btree_map::{BTreeMap, Entry as MapEntry};
 use std::ffi::OsString;
@@ -388,6 +391,87 @@ fn resolve_crc(checksum: &Checksum) -> Result<Option<u32>, Error> {
     }
 }
 
+/// Computes the BLAKE3 digest of a file's bytes.
+pub fn blake3_of_file(path: &Path) -> Result<[u8; 32], Error> {
+    let mut file = File::open(path).map_err(|e| io_error(path, e))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(io_error(path, e)),
+        };
+        hasher.update(&buf[..n]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Reads until `buf` is full or the file ends, and returns the count read.
+fn fill(file: &mut File, path: &Path, buf: &mut [u8]) -> Result<usize, Error> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(io_error(path, e)),
+        }
+    }
+    Ok(filled)
+}
+
+/// Compares 2 files byte for byte.
+///
+/// Returns `None` when every byte matches, or the offset of the 1st byte that
+/// differs. When 1 file ends before the other, the offset is where it ends.
+pub fn first_difference(left: &Path, right: &Path) -> Result<Option<u64>, Error> {
+    let mut lf = File::open(left).map_err(|e| io_error(left, e))?;
+    let mut rf = File::open(right).map_err(|e| io_error(right, e))?;
+    let mut lbuf = vec![0u8; 64 * 1024];
+    let mut rbuf = vec![0u8; 64 * 1024];
+    let mut offset = 0u64;
+    loop {
+        let ln = fill(&mut lf, left, &mut lbuf)?;
+        let rn = fill(&mut rf, right, &mut rbuf)?;
+        let common = ln.min(rn);
+        if let Some(i) = (0..common).find(|&i| lbuf[i] != rbuf[i]) {
+            return Ok(Some(offset + i as u64));
+        }
+        if ln != rn {
+            return Ok(Some(offset + common as u64));
+        }
+        if ln == 0 {
+            return Ok(None);
+        }
+        offset += ln as u64;
+    }
+}
+
+/// Which digest compares 2 folder files of equal size.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum HashKind {
+    /// CRC-32, the default.
+    #[default]
+    Crc32,
+    /// BLAKE3, a collision-resistant hash.
+    Blake3,
+}
+
+/// How a pair of equal size is checked.
+///
+/// `hash` and `verify` apply only when both files are folder files on disk.
+/// A pair with a zip entry on either side always compares CRC-32 values,
+/// because a zip entry is never extracted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Check {
+    /// The digest for 2 folder files.
+    pub hash: HashKind,
+    /// Compare 2 folder files byte for byte. This wins over `hash`.
+    pub verify: bool,
+}
+
 /// 2 paired files, 1 from each side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pair {
@@ -412,6 +496,15 @@ pub enum Reason {
     Size,
     /// The sizes match and the CRC-32 values differ.
     Crc32 { left: u32, right: u32 },
+    /// The sizes match and the BLAKE3 digests differ (`--hash blake3`).
+    Blake3 { left: [u8; 32], right: [u8; 32] },
+    /// The sizes match and the bytes differ, 1st at this offset (`--verify`).
+    Bytes { offset: u64 },
+}
+
+/// Lower-case hex of a byte string.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A pair whose contents differ.
@@ -463,6 +556,10 @@ impl Report {
                 let detail = match c.reason {
                     Reason::Size => format!("size {} -> {} bytes", c.left_size, c.right_size),
                     Reason::Crc32 { left, right } => format!("crc32 {left:08x} -> {right:08x}"),
+                    Reason::Blake3 { left, right } => {
+                        format!("blake3 {} -> {}", hex(&left), hex(&right))
+                    }
+                    Reason::Bytes { offset } => format!("bytes differ at offset {offset}"),
                 };
                 out.push_str(&format!("  {}  ({detail})\n", c.pair.label()));
             }
@@ -511,6 +608,15 @@ impl Report {
                         item["left_crc32"] = json!(format!("{left:08x}"));
                         item["right_crc32"] = json!(format!("{right:08x}"));
                     }
+                    Reason::Blake3 { left, right } => {
+                        item["reason"] = json!("blake3");
+                        item["left_blake3"] = json!(hex(&left));
+                        item["right_blake3"] = json!(hex(&right));
+                    }
+                    Reason::Bytes { offset } => {
+                        item["reason"] = json!("bytes");
+                        item["offset"] = json!(offset);
+                    }
                 }
                 item
             })
@@ -539,13 +645,24 @@ impl Report {
     }
 }
 
-/// Compares 2 keyed trees.
+/// Compares 2 keyed trees with the default check (CRC-32).
 ///
 /// Sizes are compared 1st. A CRC-32 is computed only for a pair of equal
 /// size, and never for a cloud-only file.
 pub fn compare_maps(
     left: &BTreeMap<String, Entry>,
     right: &BTreeMap<String, Entry>,
+) -> Result<Report, Error> {
+    compare_maps_with(left, right, Check::default())
+}
+
+/// Compares 2 keyed trees, checking each pair of equal size as `check` asks.
+///
+/// A cloud-only file is never read, whatever the check.
+pub fn compare_maps_with(
+    left: &BTreeMap<String, Entry>,
+    right: &BTreeMap<String, Entry>,
+    check: Check,
 ) -> Result<Report, Error> {
     let mut report = Report::default();
     for (key, l) in left {
@@ -565,6 +682,37 @@ pub fn compare_maps(
                 reason: Reason::Size,
             });
             continue;
+        }
+        let strong = check.verify || check.hash == HashKind::Blake3;
+        // Under the new checks, a pair with a cloud-only side is skipped before
+        // anything is read. The default check keeps its old order, which reads
+        // the other side's CRC-32 1st.
+        if strong && (l.checksum == Checksum::CloudOnly || r.checksum == Checksum::CloudOnly) {
+            report.skipped.push(pair);
+            continue;
+        }
+        if let (Checksum::OnDisk(lp), Checksum::OnDisk(rp)) = (&l.checksum, &r.checksum) {
+            if strong {
+                let reason = if check.verify {
+                    first_difference(lp, rp)?.map(|offset| Reason::Bytes { offset })
+                } else {
+                    let (lh, rh) = (blake3_of_file(lp)?, blake3_of_file(rp)?);
+                    (lh != rh).then_some(Reason::Blake3 {
+                        left: lh,
+                        right: rh,
+                    })
+                };
+                match reason {
+                    None => report.same.push(pair),
+                    Some(reason) => report.changed.push(Changed {
+                        pair,
+                        left_size: l.size,
+                        right_size: r.size,
+                        reason,
+                    }),
+                }
+                continue;
+            }
         }
         let (Some(lc), Some(rc)) = (resolve_crc(&l.checksum)?, resolve_crc(&r.checksum)?) else {
             report.skipped.push(pair);
@@ -592,11 +740,21 @@ pub fn compare_maps(
     Ok(report)
 }
 
-/// Lists, filters, pairs and compares 2 trees.
+/// Lists, filters, pairs and compares 2 trees with the default check.
 pub fn compare_trees(left: &Path, right: &Path, options: &Options) -> Result<Report, Error> {
+    compare_trees_with(left, right, options, Check::default())
+}
+
+/// Lists, filters, pairs and compares 2 trees, checking pairs as `check` asks.
+pub fn compare_trees_with(
+    left: &Path,
+    right: &Path,
+    options: &Options,
+    check: Check,
+) -> Result<Report, Error> {
     let l = index(list_tree(left)?, options, Side::Left)?;
     let r = index(list_tree(right)?, options, Side::Right)?;
-    compare_maps(&l, &r)
+    compare_maps_with(&l, &r, check)
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +768,7 @@ pub struct Args {
     pub right: PathBuf,
     pub json: bool,
     pub options: Options,
+    pub check: Check,
 }
 
 /// What the command line asks for.
@@ -632,6 +791,8 @@ Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
+  --hash NAME      crc32 (the default) or blake3, for 2 folder files.
+  --verify         Compare 2 folder files byte for byte, wins over --hash.
   --json           Print a JSON object instead of text.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -657,6 +818,7 @@ where
     let mut args = args.into_iter();
     let mut positional: Vec<OsString> = Vec::new();
     let mut json = false;
+    let mut check = Check::default();
     let mut options = Options::default();
     let mut options_done = false;
 
@@ -688,6 +850,29 @@ where
                 json = true;
                 continue;
             }
+            "--verify" if inline.is_none() => {
+                check.verify = true;
+                continue;
+            }
+            "--hash" => {
+                let value = match inline {
+                    Some(v) => v,
+                    None => match args.next() {
+                        Some(v) => v.to_string_lossy().into_owned(),
+                        None => return Err(Error::Usage("--hash needs a NAME value".into())),
+                    },
+                };
+                check.hash = match value.as_str() {
+                    "crc32" => HashKind::Crc32,
+                    "blake3" => HashKind::Blake3,
+                    _ => {
+                        return Err(Error::Usage(format!(
+                            "unknown --hash '{value}', expected crc32 or blake3"
+                        )))
+                    }
+                };
+                continue;
+            }
             "--include" => "--include",
             "--exclude" => "--exclude",
             "--pair" => "--pair",
@@ -716,6 +901,7 @@ where
             right: PathBuf::from(right),
             json,
             options,
+            check,
         })),
         Err(got) => Err(Error::Usage(format!(
             "expected 2 paths (LEFT RIGHT), got {}",
@@ -757,7 +943,7 @@ where
         }
         Command::Compare(args) => args,
     };
-    let report = compare_trees(&args.left, &args.right, &args.options)?;
+    let report = compare_trees_with(&args.left, &args.right, &args.options, args.check)?;
     if args.json {
         let value = report.to_json(
             &args.left.display().to_string(),
@@ -1102,6 +1288,293 @@ mod tests {
             parse_args(os(&["--version"])),
             Ok(Command::Version)
         ));
+    }
+
+    /// Returns 2 different 64-byte strings with the same CRC-32.
+    ///
+    /// CRC-32 is affine over GF(2), so for strings of equal length, flipping
+    /// a set of bits changes the CRC-32 by the XOR of each bit's own change.
+    /// The last 32 bits are picked to undo the change from flipping bit 0 of
+    /// byte 0. Those 32 bits always suffice, because they map 1 to 1 onto the
+    /// 32 bits of the CRC-32.
+    fn crc32_twins() -> (Vec<u8>, Vec<u8>) {
+        let a: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37)).collect();
+        let mut b = a.clone();
+        b[0] ^= 1;
+        let base = crc32fast::hash(&b);
+        let flip = |v: &mut Vec<u8>, j: usize| v[60 + j / 8] ^= 1 << (j % 8);
+        let mut basis: Vec<(u32, u32)> = Vec::new();
+        for j in 0..32 {
+            let mut c = b.clone();
+            flip(&mut c, j);
+            let (mut effect, mut mask) = (crc32fast::hash(&c) ^ base, 1u32 << j);
+            for &(be, bm) in &basis {
+                if effect ^ be < effect {
+                    effect ^= be;
+                    mask ^= bm;
+                }
+            }
+            if effect != 0 {
+                basis.push((effect, mask));
+                basis.sort_by_key(|x| std::cmp::Reverse(x.0));
+            }
+        }
+        let mut want = crc32fast::hash(&a) ^ base;
+        let mut pick = 0u32;
+        for &(be, bm) in &basis {
+            if want ^ be < want {
+                want ^= be;
+                pick ^= bm;
+            }
+        }
+        assert_eq!(want, 0, "the last 32 bits must reach every CRC-32");
+        for j in 0..32 {
+            if pick >> j & 1 == 1 {
+                flip(&mut b, j);
+            }
+        }
+        assert_eq!(crc32fast::hash(&a), crc32fast::hash(&b));
+        assert_ne!(a, b);
+        (a, b)
+    }
+
+    fn on_disk(path: &str, file: &Path) -> Entry {
+        Entry {
+            path: path.to_string(),
+            size: std::fs::metadata(file).unwrap().len(),
+            checksum: Checksum::OnDisk(file.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn first_difference_finds_the_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&a, &bytes).unwrap();
+        std::fs::write(&b, &bytes).unwrap();
+        assert_eq!(first_difference(&a, &b).unwrap(), None);
+        // Past the 1st 64 KiB buffer, so the offset must carry across reads.
+        let mut changed = bytes.clone();
+        changed[70_000] ^= 0xff;
+        std::fs::write(&b, &changed).unwrap();
+        assert_eq!(first_difference(&a, &b).unwrap(), Some(70_000));
+        // A shorter file differs where it ends.
+        std::fs::write(&b, &bytes[..1_000]).unwrap();
+        assert_eq!(first_difference(&a, &b).unwrap(), Some(1_000));
+        std::fs::write(&a, b"").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        assert_eq!(first_difference(&a, &b).unwrap(), None);
+    }
+
+    #[test]
+    fn blake3_of_file_matches_blake3() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bin");
+        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            blake3_of_file(&path).unwrap(),
+            *blake3::hash(&bytes).as_bytes()
+        );
+    }
+
+    #[test]
+    fn crc32_twins_pass_crc32_but_not_blake3_or_verify() {
+        let (a, b) = crc32_twins();
+        let dir = tempfile::tempdir().unwrap();
+        let (pa, pb) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&pa, &a).unwrap();
+        std::fs::write(&pb, &b).unwrap();
+        let left = keyed(vec![on_disk("f", &pa)]);
+        let right = keyed(vec![on_disk("f", &pb)]);
+
+        let crc = compare_maps(&left, &right).unwrap();
+        assert_eq!(crc.same.len(), 1, "CRC-32 cannot tell the twins apart");
+
+        let blake = Check {
+            hash: HashKind::Blake3,
+            verify: false,
+        };
+        let report = compare_maps_with(&left, &right, blake).unwrap();
+        assert_eq!(
+            report.changed[0].reason,
+            Reason::Blake3 {
+                left: *blake3::hash(&a).as_bytes(),
+                right: *blake3::hash(&b).as_bytes(),
+            }
+        );
+
+        let verify = Check {
+            verify: true,
+            ..Check::default()
+        };
+        let report = compare_maps_with(&left, &right, verify).unwrap();
+        assert_eq!(report.changed[0].reason, Reason::Bytes { offset: 0 });
+        assert!(!report.matches());
+    }
+
+    #[test]
+    fn equal_folder_files_are_same_under_every_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pa, pb) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&pa, b"same bytes").unwrap();
+        std::fs::write(&pb, b"same bytes").unwrap();
+        let left = keyed(vec![on_disk("f", &pa)]);
+        let right = keyed(vec![on_disk("f", &pb)]);
+        for check in [
+            Check::default(),
+            Check {
+                hash: HashKind::Blake3,
+                verify: false,
+            },
+            Check {
+                hash: HashKind::Crc32,
+                verify: true,
+            },
+            Check {
+                hash: HashKind::Blake3,
+                verify: true,
+            },
+        ] {
+            let report = compare_maps_with(&left, &right, check).unwrap();
+            assert_eq!(report.same.len(), 1, "{check:?}");
+        }
+    }
+
+    #[test]
+    fn verify_wins_over_hash() {
+        let (a, b) = crc32_twins();
+        let dir = tempfile::tempdir().unwrap();
+        let (pa, pb) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&pa, &a).unwrap();
+        std::fs::write(&pb, &b).unwrap();
+        let both = Check {
+            hash: HashKind::Blake3,
+            verify: true,
+        };
+        let report = compare_maps_with(
+            &keyed(vec![on_disk("f", &pa)]),
+            &keyed(vec![on_disk("f", &pb)]),
+            both,
+        )
+        .unwrap();
+        assert_eq!(report.changed[0].reason, Reason::Bytes { offset: 0 });
+    }
+
+    #[test]
+    fn zip_entry_pairs_fall_back_to_crc32() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, b"abcd").unwrap();
+        let left = keyed(vec![on_disk("a", &path)]);
+        let right = keyed(vec![stored("a", 4, 0x1234)]);
+        let check = Check {
+            hash: HashKind::Blake3,
+            verify: true,
+        };
+        let report = compare_maps_with(&left, &right, check).unwrap();
+        assert_eq!(
+            report.changed[0].reason,
+            Reason::Crc32 {
+                left: crc32fast::hash(b"abcd"),
+                right: 0x1234
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_only_is_never_read_under_verify() {
+        // The on-disk path does not exist: a read would fail the test.
+        let left = keyed(vec![Entry {
+            path: "big.iso".into(),
+            size: 10,
+            checksum: Checksum::OnDisk(PathBuf::from("/no/such/file")),
+        }]);
+        let right = keyed(vec![cloud("big.iso", 10)]);
+        let check = Check {
+            hash: HashKind::Blake3,
+            verify: true,
+        };
+        let report = compare_maps_with(&left, &right, check).unwrap();
+        assert_eq!(report.skipped.len(), 1);
+    }
+
+    #[test]
+    fn parse_args_reads_hash_and_verify() {
+        let Command::Compare(args) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare command");
+        };
+        assert_eq!(args.check, Check::default());
+        for (argv, hash, verify) in [
+            (vec!["--hash", "blake3", "L", "R"], HashKind::Blake3, false),
+            (vec!["--hash=crc32", "L", "R"], HashKind::Crc32, false),
+            (vec!["--verify", "L", "R"], HashKind::Crc32, true),
+            (
+                vec!["--verify", "--hash=blake3", "L", "R"],
+                HashKind::Blake3,
+                true,
+            ),
+        ] {
+            let Command::Compare(args) = parse_args(os(&argv)).unwrap() else {
+                panic!("expected a compare command");
+            };
+            assert_eq!(args.check, Check { hash, verify }, "{argv:?}");
+        }
+        assert!(matches!(
+            parse_args(os(&["--hash", "md5", "L", "R"])),
+            Err(Error::Usage(_))
+        ));
+        assert!(matches!(
+            parse_args(os(&["L", "R", "--hash"])),
+            Err(Error::Usage(_))
+        ));
+        assert!(matches!(
+            parse_args(os(&["--verify=yes", "L", "R"])),
+            Err(Error::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn text_and_json_for_blake3_and_bytes() {
+        let pair = Pair {
+            left: "f".into(),
+            right: "f".into(),
+        };
+        let report = Report {
+            changed: vec![
+                Changed {
+                    pair: pair.clone(),
+                    left_size: 2,
+                    right_size: 2,
+                    reason: Reason::Blake3 {
+                        left: [0xab; 32],
+                        right: [0x01; 32],
+                    },
+                },
+                Changed {
+                    pair,
+                    left_size: 2,
+                    right_size: 2,
+                    reason: Reason::Bytes { offset: 7 },
+                },
+            ],
+            ..Report::default()
+        };
+        let text = report.to_text();
+        assert!(text.contains(&format!(
+            "  f  (blake3 {} -> {})\n",
+            "ab".repeat(32),
+            "01".repeat(32)
+        )));
+        assert!(text.contains("  f  (bytes differ at offset 7)\n"));
+        let v = report.to_json("L", "R");
+        assert_eq!(v["changed"][0]["reason"], "blake3");
+        assert_eq!(v["changed"][0]["left_blake3"], "ab".repeat(32));
+        assert_eq!(v["changed"][0]["right_blake3"], "01".repeat(32));
+        assert_eq!(v["changed"][1]["reason"], "bytes");
+        assert_eq!(v["changed"][1]["offset"], 7);
     }
 
     #[test]

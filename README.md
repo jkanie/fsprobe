@@ -9,6 +9,9 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - Pairs files by relative path, written with forward slashes on every platform.
 - Marks a pair as changed when the sizes differ, without reading either file.
 - Compares CRC-32 values when the sizes match. A folder file has its CRC-32 computed from its bytes. A zip entry uses the CRC-32 stored in the zip.
+- With `--hash blake3`, compares 2 folder files of equal size by their BLAKE3 digests instead. CRC-32 has only 32 bits. A file can also be crafted to match any given CRC-32. BLAKE3 is a collision-resistant hash.
+- With `--verify`, compares 2 folder files of equal size byte for byte and names the offset of the 1st byte that differs. It wins over `--hash`, because a byte-for-byte compare needs no hash.
+- Keeps CRC-32 for a pair with a zip entry on either side, even with `--hash blake3` or `--verify`, because the tool never extracts a zip entry.
 - Lists changed files, files only on the left, files only on the right, then a summary line with counts of same, changed, only-left, only-right, skipped files.
 - Prints a JSON object instead of text with `--json`. Keys come out in sorted order so that 2 runs on the same trees print the same bytes.
 - Exits with 0 when the trees match, 1 when they differ, 2 on an error, like `diff`.
@@ -24,6 +27,7 @@ Anyone who compares folders, drives, zip files (for example before and after a c
 - `regex` 1.13.1 for `--include`, `--exclude`, `--pair`.
 - `zip` 9.4.2 with default features off, used only to read the central directory.
 - `crc32fast` 1.5.4 for the CRC-32 of folder files.
+- `blake3` 1.8.7 for `--hash blake3`.
 - `walkdir` 2.5.0 for the recursive folder walk.
 - `serde_json` 1.0.154 for `--json`.
 - `tempfile` 3.27.0 for the tests only.
@@ -58,6 +62,8 @@ Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
+  --hash NAME      crc32 (the default) or blake3, for 2 folder files.
+  --verify         Compare 2 folder files byte for byte, wins over --hash.
   --json           Print a JSON object instead of text.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -70,6 +76,9 @@ Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
 - A path that matches an `--exclude` is dropped even when it also matches an `--include`.
 - `--pair` removes every match from the file-name (the last path component) before pairing so that time-stamped versions of a file pair up. Folder names stay as they are.
 - When 2 files on 1 side end up with the same pairing key, the run stops with exit code 2 and names both files.
+- `--hash` takes `crc32` (the default) or `blake3`, as `--hash blake3` or `--hash=blake3`.
+- `--verify` stops reading a pair at the 1st byte that differs. Only 2 equal files are read to the end.
+- In the JSON report, a pair changed under `--hash blake3` has `"reason": "blake3"` with `left_blake3` and `right_blake3`. A pair changed under `--verify` has `"reason": "bytes"` with `offset`.
 
 ## Sample output
 
@@ -142,6 +151,27 @@ $ echo $?
 0
 ```
 
+2 folders that each hold the same `notes.txt` and a 64-byte `sensor.bin`. The 2 `sensor.bin` files differ in their 1st byte and in their last 4 bytes, which were picked such that both files share the CRC-32 `0f3ef7a7`. The default compare cannot tell them apart:
+
+```text
+$ fsprobe disk-a disk-b
+summary: 2 same, 0 changed, 0 only-left, 0 only-right, 0 skipped
+$ echo $?
+0
+$ fsprobe --verify disk-a disk-b
+changed:
+  sensor.bin  (bytes differ at offset 0)
+summary: 1 same, 1 changed, 0 only-left, 0 only-right, 0 skipped
+$ echo $?
+1
+$ fsprobe --hash blake3 disk-a disk-b
+changed:
+  sensor.bin  (blake3 d4254e071e614acce9051d7922845ccd1d4290422f353f30741001f7a682bd71 -> d8787d8ac413be45d585be38b9cfe3c61c77a95d7e749a8a45f8ca24a9a64a49)
+summary: 1 same, 1 changed, 0 only-left, 0 only-right, 0 skipped
+$ echo $?
+1
+```
+
 ## Cloud-only files
 
 Cloud services that use the Windows Cloud Files API, such as OneDrive and Dropbox, keep a placeholder on disk for a file whose data is still in the cloud. Opening or reading such a file fetches its data from the cloud.
@@ -151,7 +181,7 @@ On Windows, the tool reads the file attributes that come with the folder listing
 - `FILE_ATTRIBUTE_RECALL_ON_OPEN`, value `0x00040000`.
 - `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`, value `0x00400000`.
 
-When either bit is set, the file data is never opened:
+When either bit is set, the file data is never opened, with `--hash blake3` or `--verify` too:
 
 - A size difference still counts as changed.
 - Equal sizes put the pair in the skipped list, marked `cloud-only, not read`.

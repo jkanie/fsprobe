@@ -364,3 +364,150 @@ fn help_exits_0() {
     let expected = format!("Usage: {} [OPTIONS] LEFT RIGHT", env!("CARGO_PKG_NAME"));
     assert!(stdout(&out).starts_with(&expected));
 }
+
+/// Returns 2 different 64-byte strings with the same CRC-32.
+///
+/// CRC-32 is affine over GF(2), so for strings of equal length, flipping a set
+/// of bits changes the CRC-32 by the XOR of each bit's own change. The last 32
+/// bits are picked to undo the change from flipping bit 0 of byte 0.
+fn crc32_twins() -> (Vec<u8>, Vec<u8>) {
+    let a: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37)).collect();
+    let mut b = a.clone();
+    b[0] ^= 1;
+    let base = crc32fast::hash(&b);
+    let flip = |v: &mut Vec<u8>, j: usize| v[60 + j / 8] ^= 1 << (j % 8);
+    let mut basis: Vec<(u32, u32)> = Vec::new();
+    for j in 0..32 {
+        let mut c = b.clone();
+        flip(&mut c, j);
+        let (mut effect, mut mask) = (crc32fast::hash(&c) ^ base, 1u32 << j);
+        for &(be, bm) in &basis {
+            if effect ^ be < effect {
+                effect ^= be;
+                mask ^= bm;
+            }
+        }
+        if effect != 0 {
+            basis.push((effect, mask));
+            basis.sort_by_key(|x| std::cmp::Reverse(x.0));
+        }
+    }
+    let mut want = crc32fast::hash(&a) ^ base;
+    let mut pick = 0u32;
+    for &(be, bm) in &basis {
+        if want ^ be < want {
+            want ^= be;
+            pick ^= bm;
+        }
+    }
+    assert_eq!(want, 0);
+    for j in 0..32 {
+        if pick >> j & 1 == 1 {
+            flip(&mut b, j);
+        }
+    }
+    assert_eq!(crc32fast::hash(&a), crc32fast::hash(&b));
+    assert_ne!(a, b);
+    (a, b)
+}
+
+fn twin_folders(t: &TempDir) -> (PathBuf, PathBuf, Vec<u8>, Vec<u8>) {
+    let (a, b) = crc32_twins();
+    let l = t.path().join("l");
+    let r = t.path().join("r");
+    fs::create_dir_all(&l).unwrap();
+    fs::create_dir_all(&r).unwrap();
+    fs::write(l.join("f.bin"), &a).unwrap();
+    fs::write(r.join("f.bin"), &b).unwrap();
+    (l, r, a, b)
+}
+
+#[test]
+fn crc32_twins_pass_by_default() {
+    let t = TempDir::new().unwrap();
+    let (l, r, _, _) = twin_folders(&t);
+    let out = run2(&l, &r, &[]);
+    assert_eq!(code(&out), 0, "{}", stdout(&out));
+    assert!(stdout(&out).contains("1 same, 0 changed"));
+}
+
+#[test]
+fn verify_catches_crc32_twins() {
+    let t = TempDir::new().unwrap();
+    let (l, r, _, _) = twin_folders(&t);
+    let out = run2(&l, &r, &["--verify"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "changed:\n  f.bin  (bytes differ at offset 0)\n\
+         summary: 0 same, 1 changed, 0 only-left, 0 only-right, 0 skipped\n"
+    );
+}
+
+#[test]
+fn blake3_catches_crc32_twins() {
+    let t = TempDir::new().unwrap();
+    let (l, r, a, b) = twin_folders(&t);
+    for flags in [&["--hash", "blake3"][..], &["--hash=blake3"][..]] {
+        let out = run2(&l, &r, flags);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        let expected = format!(
+            "  f.bin  (blake3 {} -> {})\n",
+            blake3::hash(&a).to_hex(),
+            blake3::hash(&b).to_hex()
+        );
+        assert!(stdout(&out).contains(&expected), "{}", stdout(&out));
+    }
+}
+
+#[test]
+fn verify_json_names_the_offset() {
+    let t = TempDir::new().unwrap();
+    let l = write_folder(&t.path().join("l"), BASE);
+    let r = write_folder(
+        &t.path().join("r"),
+        &with(&[("docs/deep/data.bin", &[0, 1, 2, 3, 4, 9, 6, 7])]),
+    );
+    let out = run2(&l, &r, &["--verify", "--json"]);
+    assert_eq!(code(&out), 1);
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let changed = &v["changed"][0];
+    assert_eq!(changed["left"], "docs/deep/data.bin");
+    assert_eq!(changed["reason"], "bytes");
+    assert_eq!(changed["offset"], 5);
+    assert_eq!(v["summary"]["same"], 2);
+}
+
+#[test]
+fn verify_and_blake3_fall_back_to_crc32_for_zip_entries() {
+    let t = TempDir::new().unwrap();
+    let l = write_folder(&t.path().join("l"), BASE);
+    let r = write_zip(
+        &t.path().join("r.zip"),
+        &with(&[("readme.txt", b"HELLO\n")]),
+    );
+    for flags in [&["--verify"][..], &["--hash", "blake3"][..]] {
+        let out = run2(&l, &r, flags);
+        assert_eq!(code(&out), 1);
+        let expected = format!(
+            "  readme.txt  (crc32 {:08x} -> {:08x})\n",
+            crc32fast::hash(b"hello\n"),
+            crc32fast::hash(b"HELLO\n")
+        );
+        assert!(stdout(&out).contains(&expected), "{}", stdout(&out));
+        assert!(stdout(&out).contains("2 same, 1 changed"));
+    }
+}
+
+#[test]
+fn unknown_hash_exits_2() {
+    let t = TempDir::new().unwrap();
+    let l = write_folder(&t.path().join("l"), BASE);
+    let out = run2(&l, &l, &["--hash", "md5"]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("unknown --hash 'md5', expected crc32 or blake3"),
+        "{}",
+        stderr(&out)
+    );
+}
