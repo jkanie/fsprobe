@@ -511,3 +511,93 @@ fn unknown_hash_exits_2() {
         stderr(&out)
     );
 }
+
+/// 2 folders with 240 files in 6 sub-folders. Every 4th file has other bytes of
+/// the same size, every 6th has a different size, every 9th is on the left only.
+/// Each file's name with its left bytes and right bytes (empty when the file is
+/// on the left only).
+type Files = Vec<(String, Vec<u8>, Vec<u8>)>;
+
+fn many_files(t: &TempDir) -> (PathBuf, PathBuf, Files) {
+    let l = t.path().join("l");
+    let r = t.path().join("r");
+    let mut pairs = Vec::new();
+    for i in 0..240u32 {
+        let name = format!("s{}/n{:03}.dat", i % 6, (i * 53) % 997);
+        let left: Vec<u8> = (0..(i * 131) % 5_000 + 1).map(|j| (j ^ i) as u8).collect();
+        let mut right = left.clone();
+        if i % 4 == 0 {
+            right[0] ^= 0xff;
+        }
+        if i % 6 == 0 {
+            right.push(0);
+        }
+        let path = l.join(&name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, &left).unwrap();
+        if i % 9 != 0 {
+            let path = r.join(&name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, &right).unwrap();
+        }
+        pairs.push((name, left, if i % 9 == 0 { Vec::new() } else { right }));
+    }
+    pairs.sort();
+    (l, r, pairs)
+}
+
+#[test]
+fn many_files_print_in_path_order_on_every_run() {
+    let t = TempDir::new().unwrap();
+    let (l, r, pairs) = many_files(&t);
+    let (mut changed, mut only_left, mut same) = (String::new(), String::new(), 0);
+    for (name, a, b) in &pairs {
+        if b.is_empty() {
+            only_left.push_str(&format!("  {name}\n"));
+        } else if a.len() != b.len() {
+            changed.push_str(&format!(
+                "  {name}  (size {} -> {} bytes)\n",
+                a.len(),
+                b.len()
+            ));
+        } else if a != b {
+            changed.push_str(&format!(
+                "  {name}  (crc32 {:08x} -> {:08x})\n",
+                crc32fast::hash(a),
+                crc32fast::hash(b)
+            ));
+        } else {
+            same += 1;
+        }
+    }
+    let n_changed = changed.lines().count();
+    let n_left = only_left.lines().count();
+    assert!(same > 50 && n_changed > 50 && n_left > 20);
+    let expected = format!(
+        "changed:\n{changed}only in left:\n{only_left}\
+         summary: {same} same, {n_changed} changed, {n_left} only-left, 0 only-right, 0 skipped\n"
+    );
+    for _ in 0..5 {
+        let out = run2(&l, &r, &[]);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        assert_eq!(stdout(&out), expected);
+    }
+    let summary = format!("summary: {same} same, {n_changed} changed");
+    for flags in [
+        &["--verify"][..],
+        &["--hash", "blake3"][..],
+        &["--json"][..],
+    ] {
+        let first = stdout(&run2(&l, &r, flags));
+        if flags == ["--json"] {
+            let v: Value = serde_json::from_str(&first).unwrap();
+            assert_eq!(v["summary"]["changed"], n_changed);
+            assert_eq!(v["summary"]["same"], same);
+        } else {
+            assert!(first.contains(&summary), "{first}");
+        }
+        for _ in 0..4 {
+            assert_eq!(stdout(&run2(&l, &r, flags)), first, "{flags:?}");
+        }
+    }
+}

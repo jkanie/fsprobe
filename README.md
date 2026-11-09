@@ -8,6 +8,8 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - Reads each zip file from its central directory only (names, sizes, stored CRC-32 values), with no entry ever extracted. Folder entries inside a zip are skipped.
 - Pairs files by relative path, written with forward slashes on every platform.
 - Marks a pair as changed when the sizes differ, without reading either file.
+- Compares every size before it reads any file. It then reads only the files of the pairs whose sizes match, on as many threads as `std::thread::available_parallelism` reports for the process, never more threads than reads.
+- Prints the same report for any thread count. Each list keeps the same order, whichever thread ends 1st. On a read error, the run names the same file as a run on 1 thread.
 - Compares CRC-32 values when the sizes match. A folder file has its CRC-32 computed from its bytes. A zip entry uses the CRC-32 stored in the zip.
 - With `--hash blake3`, compares 2 folder files of equal size by their BLAKE3 digests instead. CRC-32 has only 32 bits. A file can also be crafted to match any given CRC-32. BLAKE3 is a collision-resistant hash.
 - With `--verify`, compares 2 folder files of equal size byte for byte and names the offset of the 1st byte that differs. It wins over `--hash`, because a byte-for-byte compare needs no hash.
@@ -32,7 +34,7 @@ Anyone who compares folders, drives, zip files (for example before and after a c
 - `serde_json` 1.0.154 for `--json`.
 - `tempfile` 3.27.0 for the tests only.
 
-The argument parser is hand-written, with no parser crate.
+The argument parser is hand-written, with no parser crate. The reads run on `std::thread::scope` threads from the standard library, with no thread-pool crate.
 
 ## Build and run
 

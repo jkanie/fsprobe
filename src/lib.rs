@@ -6,13 +6,20 @@
 //!
 //! For 2 folder files of equal size, `--hash blake3` compares BLAKE3 digests
 //! and `--verify` compares the bytes themselves.
+//!
+//! Every size is compared before any file is read. The reads for the pairs of
+//! equal size then run on as many threads as
+//! `std::thread::available_parallelism` reports.
 
 use std::collections::btree_map::{BTreeMap, Entry as MapEntry};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, Metadata};
 use std::io::{self, BufReader, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -383,14 +390,6 @@ pub fn crc32_of_file(path: &Path) -> Result<u32, Error> {
     Ok(hasher.finalize())
 }
 
-fn resolve_crc(checksum: &Checksum) -> Result<Option<u32>, Error> {
-    match checksum {
-        Checksum::Stored(crc) => Ok(Some(*crc)),
-        Checksum::OnDisk(path) => crc32_of_file(path).map(Some),
-        Checksum::CloudOnly => Ok(None),
-    }
-}
-
 /// Computes the BLAKE3 digest of a file's bytes.
 pub fn blake3_of_file(path: &Path) -> Result<[u8; 32], Error> {
     let mut file = File::open(path).map_err(|e| io_error(path, e))?;
@@ -658,16 +657,129 @@ pub fn compare_maps(
 
 /// Compares 2 keyed trees, checking each pair of equal size as `check` asks.
 ///
-/// A cloud-only file is never read, whatever the check.
+/// Every size is compared before any file is read. The reads then run on
+/// [`default_threads`] threads. A cloud-only file is never read, whatever the
+/// check.
 pub fn compare_maps_with(
     left: &BTreeMap<String, Entry>,
     right: &BTreeMap<String, Entry>,
     check: Check,
 ) -> Result<Report, Error> {
-    let mut report = Report::default();
+    compare_maps_threads(left, right, check, default_threads())
+}
+
+/// The thread count for the reads: the value that
+/// `std::thread::available_parallelism` reports, or 1 when that call fails.
+pub fn default_threads() -> NonZeroUsize {
+    thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+}
+
+/// Compares 2 keyed trees like [`compare_maps_with`], reading files on at
+/// most `threads` threads.
+///
+/// The report is the same for every thread count. On a read error, the error
+/// is the one a single thread meets 1st, because tasks are numbered in
+/// pairing-key order (left side before right side) and the lowest-numbered
+/// error wins.
+pub fn compare_maps_threads(
+    left: &BTreeMap<String, Entry>,
+    right: &BTreeMap<String, Entry>,
+    check: Check,
+    threads: NonZeroUsize,
+) -> Result<Report, Error> {
+    let plan = plan(left, right, check);
+    let done = run_tasks(&plan.tasks, threads.get())?;
+    Ok(plan.finish(&done))
+}
+
+/// 1 read that a pair of equal size needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Task<'a> {
+    Crc32(&'a Path),
+    Blake3(&'a Path),
+    Verify(&'a Path, &'a Path),
+}
+
+/// The result of 1 [`Task`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Done {
+    Crc32(u32),
+    Blake3([u8; 32]),
+    Verify(Option<u64>),
+}
+
+impl Task<'_> {
+    fn run(self) -> Result<Done, Error> {
+        match self {
+            Task::Crc32(path) => crc32_of_file(path).map(Done::Crc32),
+            Task::Blake3(path) => blake3_of_file(path).map(Done::Blake3),
+            Task::Verify(l, r) => first_difference(l, r).map(Done::Verify),
+        }
+    }
+}
+
+/// 1 side's CRC-32, known from the listing or still to be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Crc {
+    /// Stored in a zip, or `None` for a cloud-only file.
+    Known(Option<u32>),
+    /// Computed by the task with this number.
+    Task(usize),
+}
+
+/// What a paired key needs before it can go into the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
+    /// The sizes differ. Settled without a read.
+    Changed(Changed),
+    /// A cloud-only side under `--hash blake3` or `--verify`. Settled without
+    /// a read.
+    Skipped(Pair),
+    /// Waits for the CRC-32 task of each side on disk.
+    Crc32 {
+        pair: Pair,
+        size: u64,
+        left: Crc,
+        right: Crc,
+    },
+    /// Waits for the BLAKE3 task of each side.
+    Blake3 {
+        pair: Pair,
+        size: u64,
+        left: usize,
+        right: usize,
+    },
+    /// Waits for 1 byte-for-byte task.
+    Verify { pair: Pair, size: u64, task: usize },
+}
+
+/// Every pair in pairing-key order, plus the reads they need.
+#[derive(Debug)]
+struct Plan<'a> {
+    steps: Vec<Step>,
+    tasks: Vec<Task<'a>>,
+    only_left: Vec<String>,
+    only_right: Vec<String>,
+}
+
+/// Compares every size and lists the reads that the pairs of equal size need.
+///
+/// Nothing is read here. A pair whose sizes differ gets no task.
+fn plan<'a>(
+    left: &'a BTreeMap<String, Entry>,
+    right: &'a BTreeMap<String, Entry>,
+    check: Check,
+) -> Plan<'a> {
+    let mut plan = Plan {
+        steps: Vec::new(),
+        tasks: Vec::new(),
+        only_left: Vec::new(),
+        only_right: Vec::new(),
+    };
+    let strong = check.verify || check.hash == HashKind::Blake3;
     for (key, l) in left {
         let Some(r) = right.get(key) else {
-            report.only_left.push(l.path.clone());
+            plan.only_left.push(l.path.clone());
             continue;
         };
         let pair = Pair {
@@ -675,69 +787,193 @@ pub fn compare_maps_with(
             right: r.path.clone(),
         };
         if l.size != r.size {
-            report.changed.push(Changed {
+            plan.steps.push(Step::Changed(Changed {
                 pair,
                 left_size: l.size,
                 right_size: r.size,
                 reason: Reason::Size,
-            });
+            }));
             continue;
         }
-        let strong = check.verify || check.hash == HashKind::Blake3;
+        let size = l.size;
         // Under the new checks, a pair with a cloud-only side is skipped before
         // anything is read. The default check keeps its old order, which reads
         // the other side's CRC-32 1st.
         if strong && (l.checksum == Checksum::CloudOnly || r.checksum == Checksum::CloudOnly) {
-            report.skipped.push(pair);
+            plan.steps.push(Step::Skipped(pair));
             continue;
         }
-        if let (Checksum::OnDisk(lp), Checksum::OnDisk(rp)) = (&l.checksum, &r.checksum) {
-            if strong {
-                let reason = if check.verify {
-                    first_difference(lp, rp)?.map(|offset| Reason::Bytes { offset })
-                } else {
-                    let (lh, rh) = (blake3_of_file(lp)?, blake3_of_file(rp)?);
-                    (lh != rh).then_some(Reason::Blake3 {
-                        left: lh,
-                        right: rh,
-                    })
-                };
-                match reason {
-                    None => report.same.push(pair),
-                    Some(reason) => report.changed.push(Changed {
-                        pair,
-                        left_size: l.size,
-                        right_size: r.size,
-                        reason,
-                    }),
-                }
-                continue;
-            }
-        }
-        let (Some(lc), Some(rc)) = (resolve_crc(&l.checksum)?, resolve_crc(&r.checksum)?) else {
-            report.skipped.push(pair);
-            continue;
+        let mut add = |task| {
+            plan.tasks.push(task);
+            plan.tasks.len() - 1
         };
-        if lc == rc {
-            report.same.push(pair);
-        } else {
-            report.changed.push(Changed {
+        let step = match (&l.checksum, &r.checksum) {
+            (Checksum::OnDisk(lp), Checksum::OnDisk(rp)) if check.verify => Step::Verify {
                 pair,
-                left_size: l.size,
-                right_size: r.size,
-                reason: Reason::Crc32 {
-                    left: lc,
-                    right: rc,
-                },
-            });
-        }
+                size,
+                task: add(Task::Verify(lp, rp)),
+            },
+            (Checksum::OnDisk(lp), Checksum::OnDisk(rp)) if strong => Step::Blake3 {
+                pair,
+                size,
+                left: add(Task::Blake3(lp)),
+                right: add(Task::Blake3(rp)),
+            },
+            (lc, rc) => {
+                let mut crc = |checksum: &'a Checksum| match checksum {
+                    Checksum::Stored(crc) => Crc::Known(Some(*crc)),
+                    Checksum::OnDisk(path) => Crc::Task(add(Task::Crc32(path))),
+                    Checksum::CloudOnly => Crc::Known(None),
+                };
+                let left = crc(lc);
+                let right = crc(rc);
+                Step::Crc32 {
+                    pair,
+                    size,
+                    left,
+                    right,
+                }
+            }
+        };
+        plan.steps.push(step);
     }
     for (key, r) in right {
         if !left.contains_key(key) {
-            report.only_right.push(r.path.clone());
+            plan.only_right.push(r.path.clone());
         }
     }
-    Ok(report)
+    plan
+}
+
+impl Plan<'_> {
+    /// Builds the report from the task results, in pairing-key order.
+    fn finish(self, done: &[Done]) -> Report {
+        let crc = |c: Crc| match c {
+            Crc::Known(value) => value,
+            Crc::Task(i) => match done[i] {
+                Done::Crc32(value) => Some(value),
+                other => unreachable!("task {i} is a CRC-32, got {other:?}"),
+            },
+        };
+        let blake3 = |i: usize| match done[i] {
+            Done::Blake3(digest) => digest,
+            other => unreachable!("task {i} is a BLAKE3, got {other:?}"),
+        };
+        let mut report = Report {
+            only_left: self.only_left,
+            only_right: self.only_right,
+            ..Report::default()
+        };
+        let changed = |pair, size, reason| Changed {
+            pair,
+            left_size: size,
+            right_size: size,
+            reason,
+        };
+        for step in self.steps {
+            let (pair, size, reason) = match step {
+                Step::Changed(c) => {
+                    report.changed.push(c);
+                    continue;
+                }
+                Step::Skipped(pair) => {
+                    report.skipped.push(pair);
+                    continue;
+                }
+                Step::Crc32 {
+                    pair,
+                    size,
+                    left,
+                    right,
+                } => {
+                    let (Some(lc), Some(rc)) = (crc(left), crc(right)) else {
+                        report.skipped.push(pair);
+                        continue;
+                    };
+                    let reason = (lc != rc).then_some(Reason::Crc32 {
+                        left: lc,
+                        right: rc,
+                    });
+                    (pair, size, reason)
+                }
+                Step::Blake3 {
+                    pair,
+                    size,
+                    left,
+                    right,
+                } => {
+                    let (lh, rh) = (blake3(left), blake3(right));
+                    let reason = (lh != rh).then_some(Reason::Blake3 {
+                        left: lh,
+                        right: rh,
+                    });
+                    (pair, size, reason)
+                }
+                Step::Verify { pair, size, task } => {
+                    let reason = match done[task] {
+                        Done::Verify(offset) => offset.map(|offset| Reason::Bytes { offset }),
+                        other => unreachable!("task {task} is a verify, got {other:?}"),
+                    };
+                    (pair, size, reason)
+                }
+            };
+            match reason {
+                None => report.same.push(pair),
+                Some(reason) => report.changed.push(changed(pair, size, reason)),
+            }
+        }
+        report
+    }
+}
+
+/// Runs `tasks` on at most `threads` threads and returns the results in task
+/// order.
+///
+/// Each thread takes the next task number from a shared counter, so a slow
+/// file holds up only its own thread. After an error, no thread starts a task
+/// numbered above it, and the lowest-numbered error is returned.
+fn run_tasks(tasks: &[Task<'_>], threads: usize) -> Result<Vec<Done>, Error> {
+    let threads = threads.min(tasks.len()).max(1);
+    let next = AtomicUsize::new(0);
+    let stop = AtomicUsize::new(usize::MAX);
+    let work = || {
+        let mut out = Vec::new();
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= tasks.len() || i > stop.load(Ordering::Relaxed) {
+                return out;
+            }
+            let result = tasks[i].run();
+            if result.is_err() {
+                stop.fetch_min(i, Ordering::Relaxed);
+            }
+            out.push((i, result));
+        }
+    };
+    let batches = if threads == 1 {
+        vec![work()]
+    } else {
+        thread::scope(|s| {
+            let handles: Vec<_> = (0..threads).map(|_| s.spawn(work)).collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        })
+    };
+    let mut slots: Vec<Option<Result<Done, Error>>> = (0..tasks.len()).map(|_| None).collect();
+    for (i, result) in batches.into_iter().flatten() {
+        slots[i] = Some(result);
+    }
+    // Every task numbered below the lowest error ran, so the slots fill up in
+    // order until that error.
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("every task before the 1st error runs"))
+        .collect()
 }
 
 /// Lists, filters, pairs and compares 2 trees with the default check.
@@ -1575,6 +1811,319 @@ mod tests {
         assert_eq!(v["changed"][0]["right_blake3"], "01".repeat(32));
         assert_eq!(v["changed"][1]["reason"], "bytes");
         assert_eq!(v["changed"][1]["offset"], 7);
+    }
+
+    /// The compare loop as it was before the reads were staged and spread
+    /// across threads, kept here to check the new code against.
+    fn serial_reference(
+        left: &BTreeMap<String, Entry>,
+        right: &BTreeMap<String, Entry>,
+        check: Check,
+    ) -> Result<Report, Error> {
+        fn resolve_crc(checksum: &Checksum) -> Result<Option<u32>, Error> {
+            match checksum {
+                Checksum::Stored(crc) => Ok(Some(*crc)),
+                Checksum::OnDisk(path) => crc32_of_file(path).map(Some),
+                Checksum::CloudOnly => Ok(None),
+            }
+        }
+        let mut report = Report::default();
+        for (key, l) in left {
+            let Some(r) = right.get(key) else {
+                report.only_left.push(l.path.clone());
+                continue;
+            };
+            let pair = Pair {
+                left: l.path.clone(),
+                right: r.path.clone(),
+            };
+            if l.size != r.size {
+                report.changed.push(Changed {
+                    pair,
+                    left_size: l.size,
+                    right_size: r.size,
+                    reason: Reason::Size,
+                });
+                continue;
+            }
+            let strong = check.verify || check.hash == HashKind::Blake3;
+            if strong && (l.checksum == Checksum::CloudOnly || r.checksum == Checksum::CloudOnly) {
+                report.skipped.push(pair);
+                continue;
+            }
+            if let (Checksum::OnDisk(lp), Checksum::OnDisk(rp)) = (&l.checksum, &r.checksum) {
+                if strong {
+                    let reason = if check.verify {
+                        first_difference(lp, rp)?.map(|offset| Reason::Bytes { offset })
+                    } else {
+                        let (lh, rh) = (blake3_of_file(lp)?, blake3_of_file(rp)?);
+                        (lh != rh).then_some(Reason::Blake3 {
+                            left: lh,
+                            right: rh,
+                        })
+                    };
+                    match reason {
+                        None => report.same.push(pair),
+                        Some(reason) => report.changed.push(Changed {
+                            pair,
+                            left_size: l.size,
+                            right_size: r.size,
+                            reason,
+                        }),
+                    }
+                    continue;
+                }
+            }
+            let (Some(lc), Some(rc)) = (resolve_crc(&l.checksum)?, resolve_crc(&r.checksum)?)
+            else {
+                report.skipped.push(pair);
+                continue;
+            };
+            if lc == rc {
+                report.same.push(pair);
+            } else {
+                report.changed.push(Changed {
+                    pair,
+                    left_size: l.size,
+                    right_size: r.size,
+                    reason: Reason::Crc32 {
+                        left: lc,
+                        right: rc,
+                    },
+                });
+            }
+        }
+        for (key, r) in right {
+            if !left.contains_key(key) {
+                report.only_right.push(r.path.clone());
+            }
+        }
+        Ok(report)
+    }
+
+    const ALL_CHECKS: [Check; 4] = [
+        Check {
+            hash: HashKind::Crc32,
+            verify: false,
+        },
+        Check {
+            hash: HashKind::Blake3,
+            verify: false,
+        },
+        Check {
+            hash: HashKind::Crc32,
+            verify: true,
+        },
+        Check {
+            hash: HashKind::Blake3,
+            verify: true,
+        },
+    ];
+
+    fn threads(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).unwrap()
+    }
+
+    /// A path that does not exist. Opening it fails, so a pair that holds it
+    /// proves by passing that it was never read.
+    fn missing(dir: &Path, name: &str) -> Entry {
+        Entry {
+            path: name.to_string(),
+            size: 0,
+            checksum: Checksum::OnDisk(dir.join("missing").join(name)),
+        }
+    }
+
+    /// 2 keyed trees with 300 keys that cover every kind of pair: equal files,
+    /// files of equal size with other bytes, CRC-32 twins, sizes that differ
+    /// (with files that do not exist), zip entries, cloud-only files, files on
+    /// 1 side only.
+    fn mixed_trees(dir: &Path) -> (BTreeMap<String, Entry>, BTreeMap<String, Entry>) {
+        let (twin_a, twin_b) = crc32_twins();
+        let (mut l, mut r) = (Vec::new(), Vec::new());
+        let write = |side: &str, name: &str, bytes: &[u8]| {
+            let path = dir.join(side).join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            on_disk(name, &path)
+        };
+        for i in 0..300u32 {
+            // Names whose byte order differs from creation order.
+            let name = format!("d{}/f{:03}.bin", i % 7, (i * 37) % 1000);
+            let body: Vec<u8> = (0..(i * 97) % 3_000).map(|j| (j * i % 251) as u8).collect();
+            match i % 10 {
+                0..=2 => {
+                    l.push(write("l", &name, &body));
+                    r.push(write("r", &name, &body));
+                }
+                3 => {
+                    let mut other = body.clone();
+                    other.push(1);
+                    other[0] ^= 0x55;
+                    let mut same_len = body.clone();
+                    same_len.push(2);
+                    l.push(write("l", &name, &same_len));
+                    r.push(write("r", &name, &other));
+                }
+                4 => {
+                    let (mut a, mut b) = (missing(dir, &name), missing(dir, &name));
+                    a.size = 10 + u64::from(i);
+                    b.size = 11 + u64::from(i);
+                    l.push(a);
+                    r.push(b);
+                }
+                5 => {
+                    l.push(write("l", &name, &twin_a));
+                    r.push(write("r", &name, &twin_b));
+                }
+                6 => {
+                    l.push(write("l", &name, &body));
+                    let crc = crc32fast::hash(&body) ^ ((i / 10) & 1);
+                    r.push(stored(&name, body.len() as u64, crc));
+                }
+                7 => {
+                    l.push(write("l", &name, &body));
+                    r.push(cloud(&name, body.len() as u64));
+                }
+                8 => {
+                    l.push(cloud(&name, 5));
+                    r.push(stored(&name, 5, i));
+                }
+                _ => {
+                    if i % 20 == 9 {
+                        l.push(write("l", &name, &body));
+                    } else {
+                        r.push(write("r", &name, &body));
+                    }
+                }
+            }
+        }
+        (keyed(l), keyed(r))
+    }
+
+    #[test]
+    fn plan_reads_only_pairs_of_equal_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = mixed_trees(dir.path());
+        for check in ALL_CHECKS {
+            let plan = plan(&left, &right, check);
+            let mut read: Vec<&Path> = Vec::new();
+            for task in &plan.tasks {
+                match *task {
+                    Task::Crc32(p) | Task::Blake3(p) => read.push(p),
+                    Task::Verify(a, b) => read.extend([a, b]),
+                }
+            }
+            let mut expected: Vec<&Path> = Vec::new();
+            for (key, l) in &left {
+                let Some(r) = right.get(key) else { continue };
+                if l.size != r.size {
+                    continue;
+                }
+                let sides = [&l.checksum, &r.checksum];
+                let strong = check.verify || check.hash == HashKind::Blake3;
+                if strong && sides.contains(&&Checksum::CloudOnly) {
+                    continue;
+                }
+                for checksum in sides {
+                    if let Checksum::OnDisk(p) = checksum {
+                        expected.push(p);
+                    }
+                }
+            }
+            assert_eq!(read, expected, "{check:?}");
+            assert!(read
+                .iter()
+                .all(|p| !p.starts_with(dir.path().join("missing"))));
+            assert!(plan.tasks.len() > 50, "{check:?}");
+        }
+    }
+
+    #[test]
+    fn every_thread_count_gives_the_serial_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = mixed_trees(dir.path());
+        for check in ALL_CHECKS {
+            let serial = serial_reference(&left, &right, check).unwrap();
+            assert!(!serial.same.is_empty(), "{check:?}");
+            assert!(!serial.changed.is_empty(), "{check:?}");
+            assert!(!serial.skipped.is_empty(), "{check:?}");
+            for n in [1, 2, 3, 4, 8, 64] {
+                let report = compare_maps_threads(&left, &right, check, threads(n)).unwrap();
+                assert_eq!(report, serial, "{check:?} on {n} threads");
+                assert_eq!(report.to_text(), serial.to_text());
+                assert_eq!(report.to_json("L", "R"), serial.to_json("L", "R"));
+            }
+            assert_eq!(compare_maps_with(&left, &right, check).unwrap(), serial);
+        }
+    }
+
+    #[test]
+    fn output_order_is_stable_across_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = mixed_trees(dir.path());
+        for check in ALL_CHECKS {
+            let first = compare_maps_threads(&left, &right, check, threads(8)).unwrap();
+            let keys = |pairs: Vec<&Pair>| pairs.iter().map(|p| p.left.clone()).collect::<Vec<_>>();
+            for list in [
+                keys(first.same.iter().collect()),
+                keys(first.changed.iter().map(|c| &c.pair).collect()),
+                keys(first.skipped.iter().collect()),
+                first.only_left.clone(),
+                first.only_right.clone(),
+            ] {
+                let mut sorted = list.clone();
+                sorted.sort();
+                assert_eq!(list, sorted, "{check:?}");
+            }
+            for _ in 0..20 {
+                let again = compare_maps_threads(&left, &right, check, threads(8)).unwrap();
+                assert_eq!(again.to_text(), first.to_text(), "{check:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn read_error_is_the_first_in_key_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ok");
+        std::fs::write(&file, b"abcd").unwrap();
+        let good = |name: &str| Entry {
+            path: name.to_string(),
+            ..on_disk(name, &file)
+        };
+        let gone = |name: &str| Entry {
+            size: 4,
+            ..missing(dir.path(), name)
+        };
+        let mut l: Vec<Entry> = (0..100).map(|i| good(&format!("a{i:03}"))).collect();
+        let mut r = l.clone();
+        // Key "b" fails on its right side, key "c" on its left side.
+        l.push(good("b"));
+        r.push(gone("b"));
+        l.push(gone("c"));
+        r.push(gone("c"));
+        l.extend((0..100).map(|i| good(&format!("d{i:03}"))));
+        r.extend((0..100).map(|i| good(&format!("d{i:03}"))));
+        let (left, right) = (keyed(l), keyed(r));
+        let want = dir.path().join("missing").join("b");
+        for check in ALL_CHECKS {
+            let serial = serial_reference(&left, &right, check).unwrap_err();
+            assert!(matches!(&serial, Error::Io { path, .. } if *path == want));
+            for n in [1, 2, 3, 4, 8, 64] {
+                let err = compare_maps_threads(&left, &right, check, threads(n)).unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    serial.to_string(),
+                    "{check:?} on {n} threads"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn run_tasks_with_no_tasks() {
+        assert_eq!(run_tasks(&[], 8).unwrap(), Vec::new());
     }
 
     #[test]
