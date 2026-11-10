@@ -8,7 +8,7 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - Reads each zip file from its central directory only (names, sizes, stored CRC-32 values), with no entry ever extracted. Folder entries inside a zip are skipped.
 - Pairs files by relative path, written with forward slashes on every platform.
 - Marks a pair as changed when the sizes differ, without reading either file.
-- Compares every size before it reads any file. It then reads only the files of the pairs whose sizes match, on as many threads as `std::thread::available_parallelism` reports for the process, never more threads than reads.
+- Compares every size before it reads any file. It then reads only the files of the pairs whose sizes match, on as many threads as `std::thread::available_parallelism` reports for the process (or `--threads N`), never more threads than reads.
 - Prints the same report for any thread count. Each list keeps the same order, whichever thread ends 1st. On a read error, the run names the same file as a run on 1 thread.
 - Compares CRC-32 values when the sizes match. A folder file has its CRC-32 computed from its bytes. A zip entry uses the CRC-32 stored in the zip.
 - With `--hash blake3`, compares 2 folder files of equal size by their BLAKE3 digests instead. CRC-32 has only 32 bits. A file can also be crafted to match any given CRC-32. BLAKE3 is a collision-resistant hash.
@@ -68,6 +68,7 @@ Options:
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
                    new ones to it (created when missing).
+  --threads N      Read files on at most N threads (default: 1 per CPU).
   --json           Print a JSON object instead of text.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -83,6 +84,7 @@ Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
 - `--hash` takes `crc32` (the default) or `blake3`, as `--hash blake3` or `--hash=blake3`.
 - `--verify` stops reading a pair at the 1st byte that differs. Only 2 equal files are read to the end.
 - In the JSON report, a pair changed under `--hash blake3` has `"reason": "blake3"` with `left_blake3` and `right_blake3`. A pair changed under `--verify` has `"reason": "bytes"` with `offset`.
+- `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning backup drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
 - `--cache FILE` keeps the CRC-32 and BLAKE3 digests of folder files in a JSON file, keyed by absolute path with the size and the modified time-stamp in nanoseconds. A re-run takes the digest of each file whose size and time-stamp did not change from that file, so a 2nd run over the same backup drive reads only the files that changed. See [Digest cache](#digest-cache).
 
 ## Digest cache

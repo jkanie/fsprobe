@@ -1026,9 +1026,23 @@ pub fn compare_trees_cached(
     check: Check,
     cache: Option<&HashCache>,
 ) -> Result<Report, Error> {
+    compare_trees_threads(left, right, options, check, default_threads(), cache)
+}
+
+/// Lists, filters, pairs and compares 2 trees like [`compare_trees_cached`],
+/// reading files on at most `threads` threads. The report is the same for
+/// every thread count.
+pub fn compare_trees_threads(
+    left: &Path,
+    right: &Path,
+    options: &Options,
+    check: Check,
+    threads: NonZeroUsize,
+    cache: Option<&HashCache>,
+) -> Result<Report, Error> {
     let l = index(list_tree(left)?, options, Side::Left)?;
     let r = index(list_tree(right)?, options, Side::Right)?;
-    compare_maps_cached(&l, &r, check, default_threads(), cache)
+    compare_maps_cached(&l, &r, check, threads, cache)
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,6 +1308,8 @@ pub struct Args {
     pub check: Check,
     /// The digest cache file of `--cache`.
     pub cache: Option<PathBuf>,
+    /// The thread count of `--threads`, else `None` for [`default_threads`].
+    pub threads: Option<NonZeroUsize>,
 }
 
 /// What the command line asks for.
@@ -1320,6 +1336,7 @@ Options:
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
                    new ones to it (created when missing).
+  --threads N      Read files on at most N threads (default: 1 per CPU).
   --json           Print a JSON object instead of text.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -1348,6 +1365,7 @@ where
     let mut check = Check::default();
     let mut options = Options::default();
     let mut cache: Option<PathBuf> = None;
+    let mut threads: Option<NonZeroUsize> = None;
     let mut options_done = false;
 
     while let Some(arg) = args.next() {
@@ -1415,6 +1433,21 @@ where
                 cache = Some(PathBuf::from(value));
                 continue;
             }
+            "--threads" => {
+                let value = match inline {
+                    Some(v) => v,
+                    None => match args.next() {
+                        Some(v) => v.to_string_lossy().into_owned(),
+                        None => return Err(Error::Usage("--threads needs an N value".into())),
+                    },
+                };
+                threads = Some(value.parse::<NonZeroUsize>().map_err(|_| {
+                    Error::Usage(format!(
+                        "--threads needs a whole number of 1 or more, got '{value}'"
+                    ))
+                })?);
+                continue;
+            }
             "--include" => "--include",
             "--exclude" => "--exclude",
             "--pair" => "--pair",
@@ -1445,6 +1478,7 @@ where
             options,
             check,
             cache,
+            threads,
         })),
         Err(got) => Err(Error::Usage(format!(
             "expected 2 paths (LEFT RIGHT), got {}",
@@ -1487,11 +1521,12 @@ where
         Command::Compare(args) => args,
     };
     let cache = args.cache.as_deref().map(HashCache::load).transpose()?;
-    let report = compare_trees_cached(
+    let report = compare_trees_threads(
         &args.left,
         &args.right,
         &args.options,
         args.check,
+        args.threads.unwrap_or_else(default_threads),
         cache.as_ref(),
     )?;
     if let Some(cache) = &cache {
@@ -2698,6 +2733,34 @@ mod tests {
         for args in [vec!["L", "R", "--cache"], vec!["--cache=", "L", "R"]] {
             assert!(
                 matches!(parse_args(os(&args)), Err(Error::Usage(m)) if m == "--cache needs a FILE value")
+            );
+        }
+    }
+
+    #[test]
+    fn threads_option_is_parsed() {
+        for (args, want) in [
+            (vec!["--threads", "1", "L", "R"], 1),
+            (vec!["--threads=4", "L", "R"], 4),
+            (vec!["L", "R", "--threads", "2"], 2),
+        ] {
+            let Command::Compare(a) = parse_args(os(&args)).unwrap() else {
+                panic!("expected a compare");
+            };
+            assert_eq!(a.threads, NonZeroUsize::new(want), "{args:?}");
+        }
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert_eq!(a.threads, None);
+        assert!(
+            matches!(parse_args(os(&["L", "R", "--threads"])), Err(Error::Usage(m)) if m == "--threads needs an N value")
+        );
+        for bad in ["0", "-1", "two", "", "1.5"] {
+            let flag = format!("--threads={bad}");
+            assert!(
+                matches!(parse_args(os(&[flag.as_str(), "L", "R"])), Err(Error::Usage(m)) if m == format!("--threads needs a whole number of 1 or more, got '{bad}'")),
+                "{bad}"
             );
         }
     }

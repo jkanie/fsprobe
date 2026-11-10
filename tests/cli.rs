@@ -696,3 +696,27 @@ fn a_broken_cache_file_exits_2() {
     // The broken file is left as it was.
     assert_eq!(fs::read_to_string(&cache).unwrap(), "{ not json");
 }
+
+#[test]
+fn threads_flag_gives_the_same_report() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let r = write_folder(
+        &tmp.path().join("r"),
+        &with(&[("readme.txt", b"HELLO\n"), ("docs/new.txt", b"new\n")]),
+    );
+    let default = run2(&l, &r, &["--json"]);
+    assert_eq!(code(&default), 1);
+    for n in ["1", "2", "64"] {
+        let out = run2(&l, &r, &["--json", "--threads", n]);
+        assert_eq!(code(&out), 1, "--threads {n}");
+        assert_eq!(stdout(&out), stdout(&default), "--threads {n}");
+    }
+    let bad = run2(&l, &r, &["--threads", "0"]);
+    assert_eq!(code(&bad), 2);
+    assert!(
+        stderr(&bad).contains("--threads needs a whole number of 1 or more, got '0'"),
+        "{}",
+        stderr(&bad)
+    );
+}
