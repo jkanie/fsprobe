@@ -10,6 +10,9 @@
 //! Every size is compared before any file is read. The reads for the pairs of
 //! equal size then run on as many threads as
 //! `std::thread::available_parallelism` reports.
+//!
+//! With `--cache FILE`, a folder file whose size and modified time match the
+//! cache takes its CRC-32 or BLAKE3 digest from there instead of being read.
 
 use std::collections::btree_map::{BTreeMap, Entry as MapEntry};
 use std::ffi::OsString;
@@ -19,7 +22,9 @@ use std::io::{self, BufReader, Read, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -687,8 +692,22 @@ pub fn compare_maps_threads(
     check: Check,
     threads: NonZeroUsize,
 ) -> Result<Report, Error> {
+    compare_maps_cached(left, right, check, threads, None)
+}
+
+/// Compares 2 keyed trees like [`compare_maps_threads`]. With a cache, each
+/// CRC-32 or BLAKE3 of a folder file comes from `cache` when the file's size
+/// and modified time match, and new digests go into it. The report is the
+/// same with or without a cache.
+pub fn compare_maps_cached(
+    left: &BTreeMap<String, Entry>,
+    right: &BTreeMap<String, Entry>,
+    check: Check,
+    threads: NonZeroUsize,
+    cache: Option<&HashCache>,
+) -> Result<Report, Error> {
     let plan = plan(left, right, check);
-    let done = run_tasks(&plan.tasks, threads.get())?;
+    let done = run_tasks(&plan.tasks, threads.get(), cache)?;
     Ok(plan.finish(&done))
 }
 
@@ -709,11 +728,14 @@ enum Done {
 }
 
 impl Task<'_> {
-    fn run(self) -> Result<Done, Error> {
-        match self {
-            Task::Crc32(path) => crc32_of_file(path).map(Done::Crc32),
-            Task::Blake3(path) => blake3_of_file(path).map(Done::Blake3),
-            Task::Verify(l, r) => first_difference(l, r).map(Done::Verify),
+    fn run(self, cache: Option<&HashCache>) -> Result<Done, Error> {
+        match (self, cache) {
+            (Task::Crc32(path), Some(cache)) => cache.crc32(path).map(Done::Crc32),
+            (Task::Blake3(path), Some(cache)) => cache.blake3(path).map(Done::Blake3),
+            (Task::Crc32(path), None) => crc32_of_file(path).map(Done::Crc32),
+            (Task::Blake3(path), None) => blake3_of_file(path).map(Done::Blake3),
+            // A byte-for-byte compare reads both files every time.
+            (Task::Verify(l, r), _) => first_difference(l, r).map(Done::Verify),
         }
     }
 }
@@ -932,7 +954,11 @@ impl Plan<'_> {
 /// Each thread takes the next task number from a shared counter, so a slow
 /// file holds up only its own thread. After an error, no thread starts a task
 /// numbered above it, and the lowest-numbered error is returned.
-fn run_tasks(tasks: &[Task<'_>], threads: usize) -> Result<Vec<Done>, Error> {
+fn run_tasks(
+    tasks: &[Task<'_>],
+    threads: usize,
+    cache: Option<&HashCache>,
+) -> Result<Vec<Done>, Error> {
     let threads = threads.min(tasks.len()).max(1);
     let next = AtomicUsize::new(0);
     let stop = AtomicUsize::new(usize::MAX);
@@ -943,7 +969,7 @@ fn run_tasks(tasks: &[Task<'_>], threads: usize) -> Result<Vec<Done>, Error> {
             if i >= tasks.len() || i > stop.load(Ordering::Relaxed) {
                 return out;
             }
-            let result = tasks[i].run();
+            let result = tasks[i].run(cache);
             if result.is_err() {
                 stop.fetch_min(i, Ordering::Relaxed);
             }
@@ -988,9 +1014,270 @@ pub fn compare_trees_with(
     options: &Options,
     check: Check,
 ) -> Result<Report, Error> {
+    compare_trees_cached(left, right, options, check, None)
+}
+
+/// Lists, filters, pairs and compares 2 trees like [`compare_trees_with`],
+/// with digests taken from and added to `cache`.
+pub fn compare_trees_cached(
+    left: &Path,
+    right: &Path,
+    options: &Options,
+    check: Check,
+    cache: Option<&HashCache>,
+) -> Result<Report, Error> {
     let l = index(list_tree(left)?, options, Side::Left)?;
     let r = index(list_tree(right)?, options, Side::Right)?;
-    compare_maps_with(&l, &r, check)
+    compare_maps_cached(&l, &r, check, default_threads(), cache)
+}
+
+// ---------------------------------------------------------------------------
+// Digest cache
+// ---------------------------------------------------------------------------
+
+/// The cache file format. A file with another version is refused.
+const CACHE_VERSION: u64 = 1;
+
+/// A digest is stored only when the file was last modified this long before
+/// the read began. A write in the same clock tick as the read could otherwise
+/// leave the same size and time-stamp with new bytes (the "racy clean" case).
+pub const CACHE_SETTLE: Duration = Duration::from_secs(2);
+
+/// What the cache knows about 1 file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Cached {
+    size: u64,
+    mtime_ns: u64,
+    crc32: Option<u32>,
+    blake3: Option<[u8; 32]>,
+}
+
+/// A digest cache, keyed by absolute path, checked by size and modified time.
+///
+/// Load it with [`HashCache::load`], pass it to [`compare_trees_cached`], then
+/// [`HashCache::save`] it. Threads share it through a mutex that is held only
+/// for a lookup or an insert, never during a read.
+#[derive(Debug)]
+pub struct HashCache {
+    file: PathBuf,
+    entries: Mutex<BTreeMap<String, Cached>>,
+    changed: AtomicUsize,
+    hits: AtomicUsize,
+    reads: AtomicUsize,
+}
+
+/// The cache key and the size and time-stamp of a file, or `None` when the
+/// file cannot be cached: a path that is not UTF-8, or a time-stamp before
+/// 1970 or past the year 2554.
+fn cache_stamp(path: &Path) -> Result<Option<(String, u64, u64, SystemTime)>, Error> {
+    let meta = std::fs::metadata(path).map_err(|e| io_error(path, e))?;
+    let Ok(modified) = meta.modified() else {
+        return Ok(None);
+    };
+    let Some(ns) = modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+    else {
+        return Ok(None);
+    };
+    let absolute = std::path::absolute(path).map_err(|e| io_error(path, e))?;
+    Ok(absolute
+        .to_str()
+        .map(|key| (key.to_string(), meta.len(), ns, modified)))
+}
+
+fn parse_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+impl HashCache {
+    /// An empty cache that [`HashCache::save`] writes to `file`.
+    pub fn new(file: &Path) -> HashCache {
+        HashCache {
+            file: file.to_path_buf(),
+            entries: Mutex::new(BTreeMap::new()),
+            changed: AtomicUsize::new(0),
+            hits: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    /// Reads `file`, or starts empty when it does not exist yet.
+    pub fn load(file: &Path) -> Result<HashCache, Error> {
+        let cache = HashCache::new(file);
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(cache),
+            Err(e) => return Err(io_error(file, e)),
+        };
+        let bad = |why: &str| {
+            Error::Usage(format!(
+                "{} is not a {BIN} cache file ({why}). Delete it or name another file",
+                file.display()
+            ))
+        };
+        let value: Value = serde_json::from_str(&text).map_err(|e| bad(&e.to_string()))?;
+        if value.get("version").and_then(Value::as_u64) != Some(CACHE_VERSION) {
+            return Err(bad("unknown version"));
+        }
+        let files = value
+            .get("files")
+            .and_then(Value::as_object)
+            .ok_or_else(|| bad("no files object"))?;
+        let mut entries = BTreeMap::new();
+        for (path, item) in files {
+            let number = |key| item.get(key).and_then(Value::as_u64);
+            let (Some(size), Some(mtime_ns)) = (number("size"), number("mtime_ns")) else {
+                return Err(bad(&format!("entry {path} lacks size or mtime_ns")));
+            };
+            let text = |key| item.get(key).and_then(Value::as_str);
+            let crc32 = match text("crc32") {
+                None => None,
+                Some(t) => Some(u32::from_be_bytes(
+                    parse_hex::<4>(t).ok_or_else(|| bad(&format!("bad crc32 for {path}")))?,
+                )),
+            };
+            let blake3 = match text("blake3") {
+                None => None,
+                Some(t) => {
+                    Some(parse_hex::<32>(t).ok_or_else(|| bad(&format!("bad blake3 for {path}")))?)
+                }
+            };
+            entries.insert(
+                path.clone(),
+                Cached {
+                    size,
+                    mtime_ns,
+                    crc32,
+                    blake3,
+                },
+            );
+        }
+        *cache.entries.lock().expect("cache lock") = entries;
+        Ok(cache)
+    }
+
+    /// Writes the cache when this run added or changed an entry. The data goes
+    /// to a temporary file next to the cache, which then replaces it, so a run
+    /// that stops half-way never leaves a broken cache.
+    pub fn save(&self) -> Result<(), Error> {
+        if self.changed.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        let entries = self.entries.lock().expect("cache lock");
+        let mut files = serde_json::Map::new();
+        for (path, c) in entries.iter() {
+            let mut item = json!({ "size": c.size, "mtime_ns": c.mtime_ns });
+            if let Some(crc) = c.crc32 {
+                item["crc32"] = json!(format!("{crc:08x}"));
+            }
+            if let Some(digest) = c.blake3 {
+                item["blake3"] = json!(hex(&digest));
+            }
+            files.insert(path.clone(), item);
+        }
+        let text = serde_json::to_string(&json!({ "version": CACHE_VERSION, "files": files }))
+            .expect("a JSON value always serializes");
+        let mut tmp = self.file.clone().into_os_string();
+        tmp.push(format!(".tmp{}", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, text).map_err(|e| io_error(&tmp, e))?;
+        std::fs::rename(&tmp, &self.file).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io_error(&self.file, e)
+        })
+    }
+
+    /// How many digests came from the cache in this run.
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// How many files this run read to compute a digest.
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// How many entries the cache holds.
+    pub fn len(&self) -> usize {
+        self.entries.lock().expect("cache lock").len()
+    }
+
+    /// True when the cache holds no entry.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The CRC-32 of a file, from the cache when its size and time-stamp match.
+    pub fn crc32(&self, path: &Path) -> Result<u32, Error> {
+        self.digest(path, |c| c.crc32, |c, v| c.crc32 = Some(v), crc32_of_file)
+    }
+
+    /// The BLAKE3 digest of a file, from the cache when its size and time-stamp
+    /// match.
+    pub fn blake3(&self, path: &Path) -> Result<[u8; 32], Error> {
+        self.digest(
+            path,
+            |c| c.blake3,
+            |c, v| c.blake3 = Some(v),
+            blake3_of_file,
+        )
+    }
+
+    fn digest<T: Copy>(
+        &self,
+        path: &Path,
+        get: impl Fn(&Cached) -> Option<T>,
+        set: impl Fn(&mut Cached, T),
+        compute: impl Fn(&Path) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let Some((key, size, mtime_ns, modified)) = cache_stamp(path)? else {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            return compute(path);
+        };
+        {
+            let entries = self.entries.lock().expect("cache lock");
+            if let Some(c) = entries.get(&key) {
+                if c.size == size && c.mtime_ns == mtime_ns {
+                    if let Some(value) = get(c) {
+                        self.hits.fetch_add(1, Ordering::Relaxed);
+                        return Ok(value);
+                    }
+                }
+            }
+        }
+        let started = SystemTime::now();
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let value = compute(path)?;
+        // Store only a digest of bytes that had settled before the read began,
+        // and only when the file still has the size and time-stamp of before.
+        let settled = started
+            .duration_since(modified)
+            .is_ok_and(|age| age >= CACHE_SETTLE);
+        let unchanged = cache_stamp(path)?.is_some_and(|(_, s, m, _)| s == size && m == mtime_ns);
+        if settled && unchanged {
+            let mut entries = self.entries.lock().expect("cache lock");
+            let c = entries.entry(key).or_default();
+            if c.size != size || c.mtime_ns != mtime_ns {
+                *c = Cached {
+                    size,
+                    mtime_ns,
+                    ..Cached::default()
+                };
+            }
+            set(c, value);
+            self.changed.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(value)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1292,8 @@ pub struct Args {
     pub json: bool,
     pub options: Options,
     pub check: Check,
+    /// The digest cache file of `--cache`.
+    pub cache: Option<PathBuf>,
 }
 
 /// What the command line asks for.
@@ -1029,6 +1318,8 @@ Options:
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.
   --verify         Compare 2 folder files byte for byte, wins over --hash.
+  --cache FILE     Take digests of unchanged folder files from FILE, and add
+                   new ones to it (created when missing).
   --json           Print a JSON object instead of text.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -1056,6 +1347,7 @@ where
     let mut json = false;
     let mut check = Check::default();
     let mut options = Options::default();
+    let mut cache: Option<PathBuf> = None;
     let mut options_done = false;
 
     while let Some(arg) = args.next() {
@@ -1109,6 +1401,20 @@ where
                 };
                 continue;
             }
+            "--cache" => {
+                let value = match inline {
+                    Some(v) => OsString::from(v),
+                    None => match args.next() {
+                        Some(v) => v,
+                        None => return Err(Error::Usage("--cache needs a FILE value".into())),
+                    },
+                };
+                if value.is_empty() {
+                    return Err(Error::Usage("--cache needs a FILE value".into()));
+                }
+                cache = Some(PathBuf::from(value));
+                continue;
+            }
             "--include" => "--include",
             "--exclude" => "--exclude",
             "--pair" => "--pair",
@@ -1138,6 +1444,7 @@ where
             json,
             options,
             check,
+            cache,
         })),
         Err(got) => Err(Error::Usage(format!(
             "expected 2 paths (LEFT RIGHT), got {}",
@@ -1179,17 +1486,43 @@ where
         }
         Command::Compare(args) => args,
     };
-    let report = compare_trees_with(&args.left, &args.right, &args.options, args.check)?;
+    let cache = args.cache.as_deref().map(HashCache::load).transpose()?;
+    let report = compare_trees_cached(
+        &args.left,
+        &args.right,
+        &args.options,
+        args.check,
+        cache.as_ref(),
+    )?;
+    if let Some(cache) = &cache {
+        cache.save()?;
+    }
     if args.json {
-        let value = report.to_json(
+        let mut value = report.to_json(
             &args.left.display().to_string(),
             &args.right.display().to_string(),
         );
+        if let Some(cache) = &cache {
+            value["cache"] = json!({
+                "file": args.cache.as_ref().map(|p| p.display().to_string()),
+                "from_cache": cache.hits(),
+                "read": cache.reads(),
+            });
+        }
         let text = serde_json::to_string_pretty(&value).expect("a JSON value always serializes");
         writeln!(out, "{text}").map_err(stdout_error)?;
     } else {
         out.write_all(report.to_text().as_bytes())
             .map_err(stdout_error)?;
+        if let Some(cache) = &cache {
+            writeln!(
+                out,
+                "cache: {} from the cache, {} read",
+                cache.hits(),
+                cache.reads()
+            )
+            .map_err(stdout_error)?;
+        }
     }
     out.flush().map_err(stdout_error)?;
     Ok(if report.matches() {
@@ -2123,7 +2456,7 @@ mod tests {
 
     #[test]
     fn run_tasks_with_no_tasks() {
-        assert_eq!(run_tasks(&[], 8).unwrap(), Vec::new());
+        assert_eq!(run_tasks(&[], 8, None).unwrap(), Vec::new());
     }
 
     #[test]
@@ -2142,5 +2475,230 @@ mod tests {
         };
         let text = serde_json::to_string(&report.to_json("L", "R")).unwrap();
         assert!(text.starts_with(r#"{"changed":[{"left":"b","left_crc32":"00000001","left_size":1,"reason":"crc32","right":"b","right_crc32":"00000002","right_size":1}],"left":"L","match":false,"only_left":[]"#));
+    }
+
+    // -----------------------------------------------------------------------
+    // Digest cache
+    // -----------------------------------------------------------------------
+
+    /// Writes `bytes` to `path` and sets its modified time `age` in the past.
+    fn aged(path: &Path, bytes: &[u8], age: Duration) {
+        std::fs::write(path, bytes).unwrap();
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn cache_reads_once_then_answers_from_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.bin");
+        aged(&file, b"some bytes", HOUR);
+        let cache = HashCache::new(&dir.path().join("cache.json"));
+
+        assert_eq!(cache.crc32(&file).unwrap(), crc32_of_file(&file).unwrap());
+        assert_eq!((cache.hits(), cache.reads(), cache.len()), (0, 1, 1));
+        assert_eq!(cache.crc32(&file).unwrap(), crc32_of_file(&file).unwrap());
+        assert_eq!((cache.hits(), cache.reads()), (1, 1));
+
+        // BLAKE3 is a 2nd digest in the same entry, read once on its own.
+        assert_eq!(cache.blake3(&file).unwrap(), blake3_of_file(&file).unwrap());
+        assert_eq!(cache.blake3(&file).unwrap(), blake3_of_file(&file).unwrap());
+        assert_eq!((cache.hits(), cache.reads(), cache.len()), (2, 2, 1));
+    }
+
+    #[test]
+    fn cache_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        aged(&a, b"alpha", HOUR);
+        aged(&b, b"beta", HOUR);
+        let file = dir.path().join("cache.json");
+        let cache = HashCache::load(&file).unwrap();
+        assert!(cache.is_empty());
+        let crc = cache.crc32(&a).unwrap();
+        let digest = cache.blake3(&b).unwrap();
+        cache.save().unwrap();
+
+        let again = HashCache::load(&file).unwrap();
+        assert_eq!(again.len(), 2);
+        assert_eq!(again.crc32(&a).unwrap(), crc);
+        assert_eq!(again.blake3(&b).unwrap(), digest);
+        assert_eq!((again.hits(), again.reads()), (2, 0));
+        // No temporary file is left next to the cache.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.iter().filter(|n| n.contains(".tmp")).count(), 0);
+    }
+
+    #[test]
+    fn cache_reads_again_after_a_change_of_size_or_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.bin");
+        aged(&file, b"version 1", HOUR);
+        let cache = HashCache::new(&dir.path().join("cache.json"));
+        let first = cache.crc32(&file).unwrap();
+
+        aged(&file, b"version 2", HOUR / 2); // same size, newer time-stamp
+        let second = cache.crc32(&file).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(second, crc32_of_file(&file).unwrap());
+
+        aged(&file, b"version 30", HOUR / 2); // other size
+        assert_eq!(cache.crc32(&file).unwrap(), crc32_of_file(&file).unwrap());
+        assert_eq!((cache.hits(), cache.reads()), (0, 3));
+    }
+
+    #[test]
+    fn a_file_written_just_now_is_read_but_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("fresh.bin");
+        std::fs::write(&file, b"just written").unwrap();
+        let cache = HashCache::new(&dir.path().join("cache.json"));
+        assert_eq!(cache.crc32(&file).unwrap(), crc32_of_file(&file).unwrap());
+        assert_eq!(cache.crc32(&file).unwrap(), crc32_of_file(&file).unwrap());
+        assert_eq!((cache.hits(), cache.reads(), cache.len()), (0, 2, 0));
+        // Nothing changed, so nothing is written.
+        cache.save().unwrap();
+        assert!(!dir.path().join("cache.json").exists());
+    }
+
+    #[test]
+    fn cache_trusts_size_and_time_stamp() {
+        // The documented limit: new bytes of the same size under the same
+        // time-stamp keep the old digest. --verify always reads.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.bin");
+        aged(&file, b"aaaa", HOUR);
+        let stamp = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let cache = HashCache::new(&dir.path().join("cache.json"));
+        let old = cache.crc32(&file).unwrap();
+        std::fs::write(&file, b"bbbb").unwrap();
+        File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        assert_eq!(cache.crc32(&file).unwrap(), old);
+    }
+
+    #[test]
+    fn bad_cache_files_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cache.json");
+        for (text, why) in [
+            ("not json", "expected"),
+            (r#"{"version": 2, "files": {}}"#, "unknown version"),
+            (r#"{"version": 1}"#, "no files object"),
+            (
+                r#"{"version": 1, "files": {"/a": {"size": 1}}}"#,
+                "lacks size or mtime_ns",
+            ),
+            (
+                r#"{"version": 1, "files": {"/a": {"size": 1, "mtime_ns": 5, "crc32": "xyz"}}}"#,
+                "bad crc32",
+            ),
+            (
+                r#"{"version": 1, "files": {"/a": {"size": 1, "mtime_ns": 5, "blake3": "00"}}}"#,
+                "bad blake3",
+            ),
+        ] {
+            std::fs::write(&file, text).unwrap();
+            let err = HashCache::load(&file).unwrap_err().to_string();
+            assert!(err.contains("is not a fsprobe cache file"), "{err}");
+            assert!(err.contains(why), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_cached_run_gives_the_same_report_and_reads_nothing_the_2nd_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("l"), dir.path().join("r"));
+        for i in 0..40u32 {
+            for (side, root) in [(0u32, &l), (1, &r)] {
+                std::fs::create_dir_all(root.join("d")).unwrap();
+                // Every 3rd file differs in its bytes, every 7th in its size.
+                let mut bytes = format!("file {i:03}").into_bytes();
+                if side == 1 && i % 3 == 0 {
+                    bytes[0] = b'F';
+                }
+                if side == 1 && i % 7 == 0 {
+                    bytes.push(b'!');
+                }
+                aged(&root.join(format!("d/{i}.txt")), &bytes, HOUR);
+            }
+        }
+        let options = Options::default();
+        for check in [
+            Check::default(),
+            Check {
+                hash: HashKind::Blake3,
+                verify: false,
+            },
+        ] {
+            let plain = compare_trees_with(&l, &r, &options, check).unwrap();
+            let file = dir.path().join(format!("cache-{:?}.json", check.hash));
+            let first = HashCache::load(&file).unwrap();
+            assert_eq!(
+                compare_trees_cached(&l, &r, &options, check, Some(&first)).unwrap(),
+                plain
+            );
+            first.save().unwrap();
+            assert_eq!(first.hits(), 0);
+            let second = HashCache::load(&file).unwrap();
+            assert_eq!(
+                compare_trees_cached(&l, &r, &options, check, Some(&second)).unwrap(),
+                plain
+            );
+            assert_eq!(second.reads(), 0);
+            assert_eq!(second.hits(), first.reads());
+            // 40 keys, of which 6 differ in size: 34 pairs read on both sides.
+            assert_eq!(first.reads(), 68);
+        }
+    }
+
+    #[test]
+    fn verify_never_uses_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("l"), dir.path().join("r"));
+        std::fs::create_dir_all(&l).unwrap();
+        std::fs::create_dir_all(&r).unwrap();
+        aged(&l.join("a"), b"same", HOUR);
+        aged(&r.join("a"), b"same", HOUR);
+        let cache = HashCache::new(&dir.path().join("cache.json"));
+        let check = Check {
+            hash: HashKind::Crc32,
+            verify: true,
+        };
+        let report =
+            compare_trees_cached(&l, &r, &Options::default(), check, Some(&cache)).unwrap();
+        assert_eq!(report.same.len(), 1);
+        assert_eq!((cache.hits(), cache.reads(), cache.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn cache_option_is_parsed() {
+        for args in [
+            vec!["--cache", "c.json", "L", "R"],
+            vec!["--cache=c.json", "L", "R"],
+        ] {
+            let Command::Compare(a) = parse_args(os(&args)).unwrap() else {
+                panic!("expected a compare");
+            };
+            assert_eq!(a.cache, Some(PathBuf::from("c.json")));
+        }
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert_eq!(a.cache, None);
+        for args in [vec!["L", "R", "--cache"], vec!["--cache=", "L", "R"]] {
+            assert!(
+                matches!(parse_args(os(&args)), Err(Error::Usage(m)) if m == "--cache needs a FILE value")
+            );
+        }
     }
 }

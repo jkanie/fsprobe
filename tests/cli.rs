@@ -601,3 +601,98 @@ fn many_files_print_in_path_order_on_every_run() {
         }
     }
 }
+
+/// Sets every file under `root` to a modified time 1 hour in the past, such
+/// that the cache stores their digests.
+fn age_all(root: &Path) {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for entry in walk(root) {
+        fs::File::options()
+            .write(true)
+            .open(&entry)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+    }
+}
+
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for item in fs::read_dir(root).unwrap() {
+        let path = item.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[test]
+fn cache_answers_the_2nd_run() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let r = write_folder(&tmp.path().join("r"), &with(&[("readme.txt", b"HELLO\n")]));
+    age_all(&l);
+    age_all(&r);
+    let cache = tmp.path().join("digests.json");
+    let cache = cache.to_str().unwrap();
+
+    let first = run2(&l, &r, &["--cache", cache]);
+    assert_eq!(code(&first), 1);
+    let text = stdout(&first);
+    assert!(text.contains("readme.txt  (crc32 "), "{text}");
+    assert!(
+        text.ends_with("cache: 0 from the cache, 6 read\n"),
+        "{text}"
+    );
+
+    let second = run2(&l, &r, &["--cache", cache]);
+    assert_eq!(code(&second), 1);
+    let again = stdout(&second);
+    assert!(
+        again.ends_with("cache: 6 from the cache, 0 read\n"),
+        "{again}"
+    );
+    // Apart from the cache line, the 2 reports are the same bytes.
+    assert_eq!(
+        text.lines()
+            .filter(|l| !l.starts_with("cache:"))
+            .collect::<Vec<_>>(),
+        again
+            .lines()
+            .filter(|l| !l.starts_with("cache:"))
+            .collect::<Vec<_>>()
+    );
+
+    let json = run2(&l, &r, &["--cache", cache, "--json"]);
+    let v: Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(v["cache"]["from_cache"], 6);
+    assert_eq!(v["cache"]["read"], 0);
+    assert_eq!(v["cache"]["file"], cache);
+
+    // Without --cache, the output has no cache line or key.
+    let plain = run2(&l, &r, &[]);
+    assert!(!stdout(&plain).contains("cache:"));
+    let plain_json: Value = serde_json::from_str(&stdout(&run2(&l, &r, &["--json"]))).unwrap();
+    assert!(plain_json.get("cache").is_none());
+}
+
+#[test]
+fn a_broken_cache_file_exits_2() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let r = write_folder(&tmp.path().join("r"), BASE);
+    let cache = tmp.path().join("digests.json");
+    fs::write(&cache, "{ not json").unwrap();
+    let out = run2(&l, &r, &["--cache", cache.to_str().unwrap()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("is not a fsprobe cache file"),
+        "{}",
+        stderr(&out)
+    );
+    // The broken file is left as it was.
+    assert_eq!(fs::read_to_string(&cache).unwrap(), "{ not json");
+}

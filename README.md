@@ -66,6 +66,8 @@ Options:
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.
   --verify         Compare 2 folder files byte for byte, wins over --hash.
+  --cache FILE     Take digests of unchanged folder files from FILE, and add
+                   new ones to it (created when missing).
   --json           Print a JSON object instead of text.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -81,6 +83,20 @@ Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
 - `--hash` takes `crc32` (the default) or `blake3`, as `--hash blake3` or `--hash=blake3`.
 - `--verify` stops reading a pair at the 1st byte that differs. Only 2 equal files are read to the end.
 - In the JSON report, a pair changed under `--hash blake3` has `"reason": "blake3"` with `left_blake3` and `right_blake3`. A pair changed under `--verify` has `"reason": "bytes"` with `offset`.
+- `--cache FILE` keeps the CRC-32 and BLAKE3 digests of folder files in a JSON file, keyed by absolute path with the size and the modified time-stamp in nanoseconds. A re-run takes the digest of each file whose size and time-stamp did not change from that file, so a 2nd run over the same backup drive reads only the files that changed. See [Digest cache](#digest-cache).
+
+## Digest cache
+
+`fsprobe --cache digests.json LEFT RIGHT` prints 1 more line after the summary, such as `cache: 5210 from the cache, 14 read`. With `--json`, the report gains a `cache` object with `file`, `from_cache`, `read`. The rest of the report is the same with or without the cache.
+
+- A file whose size or time-stamp changed is read again, and its new digest replaces the old one.
+- A digest goes into the cache only when the file was last modified at least 2 seconds before the read began, and still has the same size and time-stamp after the read. A file written during the run, or in the same clock tick as the read, is read every time until it settles.
+- `--verify` reads both files every time and never uses the cache. Zip entries need no cache, because their CRC-32 comes from the zip's central directory.
+- The cache is written to a temporary file next to it, which then replaces it, so a run that stops half-way leaves the old cache whole. A run that read no new digest leaves the file untouched.
+- A file that is not a cache (bad JSON, another version, a bad digest) stops the run with exit code 2, and the file is left as it was.
+- Entries are never removed. A cache shared by many folders keeps 1 entry per file ever read.
+- The cache trusts the size and the time-stamp. A tool that writes new bytes of the same size and then sets the old time-stamp back hides the change from the cache. Use `--verify` for a check that reads every byte.
+- Paths that are not valid UTF-8, and time-stamps before 1970, are read every time.
 
 ## Sample output
 
