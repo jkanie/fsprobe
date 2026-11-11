@@ -70,6 +70,7 @@ Options:
                    new ones to it (created when missing).
   --threads N      Read files on at most N threads (default: 1 per CPU).
   --json           Print a JSON object instead of text.
+  -q, --quiet      Print nothing (wins over --json). Errors still print.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
@@ -84,7 +85,8 @@ Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
 - `--hash` takes `crc32` (the default) or `blake3`, as `--hash blake3` or `--hash=blake3`.
 - `--verify` stops reading a pair at the 1st byte that differs. Only 2 equal files are read to the end.
 - In the JSON report, a pair changed under `--hash blake3` has `"reason": "blake3"` with `left_blake3` and `right_blake3`. A pair changed under `--verify` has `"reason": "bytes"` with `offset`.
-- `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning backup drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
+- `-q` or `--quiet` prints nothing, for a script that needs only the exit status (0 when the trees match, 1 when they differ). It wins over `--json`. An error still prints its message to stderr and exits with 2. A `--cache` file is still saved.
+- `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning back-up drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
 - `--cache FILE` keeps the CRC-32 and BLAKE3 digests of folder files in a JSON file, keyed by absolute path with the size and the modified time-stamp in nanoseconds. A re-run takes the digest of each file whose size and time-stamp did not change from that file, so a 2nd run over the same backup drive reads only the files that changed. See [Digest cache](#digest-cache).
 
 ## Digest cache

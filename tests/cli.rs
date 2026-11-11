@@ -720,3 +720,25 @@ fn threads_flag_gives_the_same_report() {
         stderr(&bad)
     );
 }
+
+#[test]
+fn quiet_prints_nothing_and_keeps_the_exit_code() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let same = write_folder(&tmp.path().join("same"), BASE);
+    let r = write_folder(&tmp.path().join("r"), &with(&[("readme.txt", b"HELLO\n")]));
+    for flags in [&["-q"][..], &["--quiet"], &["--quiet", "--json"]] {
+        let out = run2(&l, &same, flags);
+        assert_eq!(code(&out), 0, "{flags:?}");
+        assert_eq!(stdout(&out), "", "{flags:?}");
+        let out = run2(&l, &r, flags);
+        assert_eq!(code(&out), 1, "{flags:?}");
+        assert_eq!(stdout(&out), "", "{flags:?}");
+        assert_eq!(stderr(&out), "", "{flags:?}");
+    }
+    let missing = tmp.path().join("missing");
+    let out = run2(&l, &missing, &["--quiet"]);
+    assert_eq!(code(&out), 2);
+    assert_eq!(stdout(&out), "");
+    assert!(!stderr(&out).is_empty());
+}

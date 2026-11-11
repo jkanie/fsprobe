@@ -1029,7 +1029,7 @@ pub fn compare_trees_cached(
     compare_trees_threads(left, right, options, check, default_threads(), cache)
 }
 
-/// Lists, filters, pairs and compares 2 trees like [`compare_trees_cached`],
+/// Lists, filters, pairs, compares 2 trees like [`compare_trees_cached`],
 /// reading files on at most `threads` threads. The report is the same for
 /// every thread count.
 pub fn compare_trees_threads(
@@ -1304,6 +1304,8 @@ pub struct Args {
     pub left: PathBuf,
     pub right: PathBuf,
     pub json: bool,
+    /// `--quiet`: print nothing, the exit code alone gives the result.
+    pub quiet: bool,
     pub options: Options,
     pub check: Check,
     /// The digest cache file of `--cache`.
@@ -1338,6 +1340,7 @@ Options:
                    new ones to it (created when missing).
   --threads N      Read files on at most N threads (default: 1 per CPU).
   --json           Print a JSON object instead of text.
+  -q, --quiet      Print nothing (wins over --json). Errors still print.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
@@ -1362,6 +1365,7 @@ where
     let mut args = args.into_iter();
     let mut positional: Vec<OsString> = Vec::new();
     let mut json = false;
+    let mut quiet = false;
     let mut check = Check::default();
     let mut options = Options::default();
     let mut cache: Option<PathBuf> = None;
@@ -1394,6 +1398,10 @@ where
             "-V" | "--version" => return Ok(Command::Version),
             "--json" if inline.is_none() => {
                 json = true;
+                continue;
+            }
+            "-q" | "--quiet" if inline.is_none() => {
+                quiet = true;
                 continue;
             }
             "--verify" if inline.is_none() => {
@@ -1475,6 +1483,7 @@ where
             left: PathBuf::from(left),
             right: PathBuf::from(right),
             json,
+            quiet,
             options,
             check,
             cache,
@@ -1532,7 +1541,9 @@ where
     if let Some(cache) = &cache {
         cache.save()?;
     }
-    if args.json {
+    if args.quiet {
+        // Nothing to print: the exit code (0 match, 1 differ) is the answer.
+    } else if args.json {
         let mut value = report.to_json(
             &args.left.display().to_string(),
             &args.right.display().to_string(),
@@ -2735,6 +2746,24 @@ mod tests {
                 matches!(parse_args(os(&args)), Err(Error::Usage(m)) if m == "--cache needs a FILE value")
             );
         }
+    }
+
+    #[test]
+    fn quiet_option_is_parsed() {
+        for args in [vec!["-q", "L", "R"], vec!["L", "R", "--quiet"]] {
+            let Command::Compare(a) = parse_args(os(&args)).unwrap() else {
+                panic!("expected a compare");
+            };
+            assert!(a.quiet, "{args:?}");
+        }
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(!a.quiet);
+        assert!(matches!(
+            parse_args(os(&["--quiet=1", "L", "R"])),
+            Err(Error::Usage(_))
+        ));
     }
 
     #[test]
