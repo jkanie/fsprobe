@@ -417,6 +417,8 @@ pub struct Options {
     pub pair: Vec<Regex>,
     /// `--follow-links`: compare what each symbolic link points to.
     pub follow_links: bool,
+    /// `--ignore-case`: pair paths that differ only in letter case.
+    pub ignore_case: bool,
 }
 
 impl Options {
@@ -433,18 +435,24 @@ impl Options {
     /// Only the last path component changes. Each `--pair` regex runs in turn
     /// and every match is removed.
     pub fn pair_key(&self, path: &str) -> String {
-        if self.pair.is_empty() {
-            return path.to_string();
-        }
-        let (dir, name) = match path.rfind('/') {
-            Some(i) => path.split_at(i + 1),
-            None => ("", path),
+        let key = if self.pair.is_empty() {
+            path.to_string()
+        } else {
+            let (dir, name) = match path.rfind('/') {
+                Some(i) => path.split_at(i + 1),
+                None => ("", path),
+            };
+            let mut name = name.to_string();
+            for re in &self.pair {
+                name = re.replace_all(&name, "").into_owned();
+            }
+            format!("{dir}{name}")
         };
-        let mut name = name.to_string();
-        for re in &self.pair {
-            name = re.replace_all(&name, "").into_owned();
+        if self.ignore_case {
+            key.to_lowercase()
+        } else {
+            key
         }
-        format!("{dir}{name}")
     }
 }
 
@@ -1478,6 +1486,8 @@ Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
+  --ignore-case    Pair paths that differ only in letter case, such as a
+                   Windows copy of a Linux tree.
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
@@ -1553,6 +1563,10 @@ where
             }
             "--follow-links" if inline.is_none() => {
                 options.follow_links = true;
+                continue;
+            }
+            "--ignore-case" if inline.is_none() => {
+                options.ignore_case = true;
                 continue;
             }
             "--verify" if inline.is_none() => {
@@ -1791,6 +1805,28 @@ mod tests {
         };
         assert!(o.keeps("docs/b.txt"));
         assert!(!o.keeps("tmp/b.txt"));
+    }
+
+    #[test]
+    fn pair_key_ignores_case_in_the_whole_path_after_pair() {
+        let o = Options {
+            pair: vec![re(STAMP)],
+            ignore_case: true,
+            ..Options::default()
+        };
+        assert_eq!(
+            o.pair_key("Docs/A_2026_11_07_04_28_PM_BC.ZIP"),
+            "docs/a.zip"
+        );
+        let o = Options {
+            ignore_case: true,
+            ..Options::default()
+        };
+        assert_eq!(
+            o.pair_key("\u{c9}t\u{c9}/Read Me.TXT"),
+            "\u{e9}t\u{e9}/read me.txt"
+        );
+        assert_eq!(Options::default().pair_key("Docs/A.TXT"), "Docs/A.TXT");
     }
 
     #[test]

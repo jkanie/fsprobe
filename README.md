@@ -65,6 +65,8 @@ Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
+  --ignore-case    Pair paths that differ only in letter case, such as a
+                   Windows copy of a Linux tree.
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
@@ -85,6 +87,7 @@ Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
 - With no `--include`, every path is kept.
 - A path that matches an `--exclude` is dropped even when it also matches an `--include`.
 - `--pair` removes every match from the file-name (the last path component) before pairing so that time-stamped versions of a file pair up. Folder names stay as they are.
+- `--ignore-case` pairs paths (folders and file-names, after `--pair`) that differ only in letter case. The report still shows each side's own spelling. 2 paths in 1 tree that differ only in case stop the run with exit status 2, since both would pair with the same file.
 - When 2 files on 1 side end up with the same pairing key, the run stops with exit code 2 and names both files.
 - `--hash` takes `crc32` (the default) or `blake3`, as `--hash blake3` or `--hash=blake3`.
 - `--verify` stops reading a pair at the 1st byte that differs. Only 2 equal files are read to the end.

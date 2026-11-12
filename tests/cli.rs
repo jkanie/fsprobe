@@ -433,6 +433,39 @@ fn follow_links_compares_what_links_point_to_and_stops_loops() {
 }
 
 #[test]
+fn ignore_case_pairs_paths_that_differ_only_in_case() {
+    let t = TempDir::new().unwrap();
+    let l = write_folder(
+        &t.path().join("l"),
+        &[("Docs/ReadMe.TXT", b"a"), ("Data.bin", b"12")],
+    );
+    let r = write_folder(
+        &t.path().join("r"),
+        &[("docs/readme.txt", b"a"), ("data.bin", b"13")],
+    );
+
+    let out = run2(&l, &r, &[]);
+    assert_eq!(code(&out), 1);
+    assert!(stdout(&out).contains("summary: 0 same, 0 changed, 2 only-left, 2 only-right"));
+
+    let out = run2(&l, &r, &["--ignore-case", "--json"]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["summary"]["same"], 1);
+    assert_eq!(v["changed"][0]["left"], "Data.bin");
+    assert_eq!(v["changed"][0]["right"], "data.bin");
+
+    // 2 names in 1 tree that differ only in case cannot both pair. Only a
+    // file system that tells case apart (as on Linux) can hold both.
+    let both = write_folder(&t.path().join("both"), &[("a.txt", b"1"), ("A.TXT", b"2")]);
+    if fs::read_dir(&both).unwrap().count() == 2 {
+        let out = run2(&both, &r, &["--ignore-case"]);
+        assert_eq!(code(&out), 2);
+        assert!(stderr(&out).contains("A.TXT"), "{}", stderr(&out));
+    }
+}
+
+#[test]
 fn missing_path_exits_2() {
     let t = TempDir::new().unwrap();
     let l = write_folder(&t.path().join("l"), BASE);
