@@ -181,6 +181,44 @@ pub fn list_tree(root: &Path) -> Result<Vec<Entry>, Error> {
     }
 }
 
+/// A symbolic link inside a folder. It is listed, never followed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// Relative path with forward slashes.
+    pub path: String,
+    /// The path that the link holds, as written in the link.
+    pub target: String,
+}
+
+/// Lists the symbolic links in a folder, sorted by path, without following
+/// them. A zip file holds no links that the tool reads, so it gives none.
+pub fn list_links(root: &Path) -> Result<Vec<Link>, Error> {
+    let meta = std::fs::metadata(root).map_err(|e| io_error(root, e))?;
+    if !meta.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for item in WalkDir::new(root).follow_links(false).min_depth(1) {
+        let item = item.map_err(|e| {
+            let path = e.path().unwrap_or(root).to_path_buf();
+            Error::Io {
+                path,
+                source: e.into(),
+            }
+        })?;
+        if !item.path_is_symlink() {
+            continue;
+        }
+        let target = std::fs::read_link(item.path()).map_err(|e| io_error(item.path(), e))?;
+        out.push(Link {
+            path: relative_path(root, item.path()),
+            target: target.to_string_lossy().into_owned(),
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
 fn has_zip_extension(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
@@ -529,12 +567,17 @@ pub struct Report {
     pub only_right: Vec<String>,
     /// Pairs with equal sizes where 1 side is cloud-only, so no data was read.
     pub skipped: Vec<Pair>,
+    /// Symbolic links in the left folder. They are listed, not compared.
+    pub links_left: Vec<Link>,
+    /// Symbolic links in the right folder. They are listed, not compared.
+    pub links_right: Vec<Link>,
 }
 
 impl Report {
     /// True when no pair changed and no file is on 1 side only.
     ///
     /// Skipped pairs had equal sizes and do not count as a difference.
+    /// Symbolic links are listed only, so they do not count either.
     pub fn matches(&self) -> bool {
         self.changed.is_empty() && self.only_left.is_empty() && self.only_right.is_empty()
     }
@@ -586,6 +629,14 @@ impl Report {
                 out.push_str(&format!("  {}  ({CLOUD_ONLY_NOTE})\n", p.label()));
             }
         }
+        if !self.links_left.is_empty() || !self.links_right.is_empty() {
+            out.push_str("symbolic links (not compared):\n");
+            for (side, links) in [("left", &self.links_left), ("right", &self.links_right)] {
+                for link in links {
+                    out.push_str(&format!("  {side:<5}  {} -> {}\n", link.path, link.target));
+                }
+            }
+        }
         out.push_str(&self.summary_line());
         out.push('\n');
         out
@@ -630,8 +681,15 @@ impl Report {
             .iter()
             .map(|p| json!({ "left": p.left, "right": p.right, "reason": CLOUD_ONLY_NOTE }))
             .collect();
+        let links = |list: &[Link]| -> Vec<Value> {
+            list.iter()
+                .map(|l| json!({ "path": l.path, "target": l.target }))
+                .collect()
+        };
         json!({
             "left": left_root,
+            "links_left": links(&self.links_left),
+            "links_right": links(&self.links_right),
             "right": right_root,
             "match": self.matches(),
             "changed": changed,
@@ -1042,7 +1100,16 @@ pub fn compare_trees_threads(
 ) -> Result<Report, Error> {
     let l = index(list_tree(left)?, options, Side::Left)?;
     let r = index(list_tree(right)?, options, Side::Right)?;
-    compare_maps_cached(&l, &r, check, threads, cache)
+    let mut report = compare_maps_cached(&l, &r, check, threads, cache)?;
+    let kept = |links: Vec<Link>| -> Vec<Link> {
+        links
+            .into_iter()
+            .filter(|l| options.keeps(&l.path))
+            .collect()
+    };
+    report.links_left = kept(list_links(left)?);
+    report.links_right = kept(list_links(right)?);
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -2520,7 +2587,7 @@ mod tests {
             ..Report::default()
         };
         let text = serde_json::to_string(&report.to_json("L", "R")).unwrap();
-        assert!(text.starts_with(r#"{"changed":[{"left":"b","left_crc32":"00000001","left_size":1,"reason":"crc32","right":"b","right_crc32":"00000002","right_size":1}],"left":"L","match":false,"only_left":[]"#));
+        assert!(text.starts_with(r#"{"changed":[{"left":"b","left_crc32":"00000001","left_size":1,"reason":"crc32","right":"b","right_crc32":"00000002","right_size":1}],"left":"L","links_left":[],"links_right":[],"match":false,"only_left":[]"#));
     }
 
     // -----------------------------------------------------------------------

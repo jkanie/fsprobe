@@ -1,11 +1,11 @@
 # Roadmap
 
-Planned work after the seed, with an hour estimate per item. The total is 25 hours.
+Planned work after the seed, with an hour estimate per item. The total is 24.5 hours.
 
 ## 1. Nested zips, 2 hours
 
 - What: an option to treat a `.zip` inside a tree as a folder and compare its central directory too.
-- Why: backups and down-loads hold zips inside folders and zips inside zips. Today a changed entry deep inside shows up only as 1 changed zip, with no hint of which entry changed.
+- Why: back-ups and down-loads hold zips inside folders and zips inside zips. Today a changed entry deep inside shows up only as 1 changed zip, with no hint of which entry changed.
 
 ## 2. Moved and re-named files by hash, 2 hours
 
@@ -22,7 +22,7 @@ Planned work after the seed, with an hour estimate per item. The total is 25 hou
 - What: `--ignore-lines REGEX` drops matching lines from both sides before the text diff and before deciding that a text file changed.
 - Why: generated files carry a time-stamp or a build number on 1 line. Without this option every such file shows as changed on every run.
 
-## 5. Snapshots, 2.5 hours
+## 5. Snap-shots, 2.5 hours
 
 - What: `snapshot TREE FILE` saves each file's path, size, hash to a file. Either side of a compare can then be a snapshot file.
 - Why: it answers "what changed since last week" without a 2nd copy of the data, and it lets a tree be checked after the original drive is gone.
@@ -47,10 +47,10 @@ Planned work after the seed, with an hour estimate per item. The total is 25 hou
 - What: a repeatable benchmark that builds a tree of 100,000 files plus a 10 GB zip, then times a cold run, a warm run, a run with the cache.
 - Why: speed claims need numbers. The benchmark also catches a slow-down before a release instead of after.
 
-## 10. Symbolic links, 1.5 hours
+## 10. Following symbolic links, 1 hour
 
-- What: list each symbolic link in its own section, with the path it points to, and add `--follow-links` to compare what the link points to instead, guarded against link loops.
-- Why: today, a link is skipped without a word. A folder that holds a link at `a.txt` therefore shows `a.txt` as only on the other side, with no hint that a link sits there.
+- What: `--follow-links` compares what each link points to instead of listing the link, guarded against link loops.
+- Why: today, a link is listed with the path it holds but never compared. When 1 side holds a link and the other side holds a copy of the file, the report cannot say whether the 2 match.
 
 ## 11. BLAKE3 and verify for zip entries, 3 hours
 
@@ -64,4 +64,4 @@ Planned work after the seed, with an hour estimate per item. The total is 25 hou
 
 ## Total
 
-27.5 hours.
+24.5 hours.

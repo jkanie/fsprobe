@@ -15,6 +15,7 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - With `--verify`, compares 2 folder files of equal size byte for byte and names the offset of the 1st byte that differs. It wins over `--hash`, because a byte-for-byte compare needs no hash.
 - Keeps CRC-32 for a pair with a zip entry on either side, even with `--hash blake3` or `--verify`, because the tool never extracts a zip entry.
 - Lists changed files, files only on the left, files only on the right, then a summary line with counts of same, changed, only-left, only-right, skipped files.
+- Lists each symbolic link inside a folder in its own section, with the path that the link holds. A link is never followed and never compared, so links alone do not make 2 trees differ. `--include` and `--exclude` apply to links too.
 - Prints a JSON object instead of text with `--json`. Keys come out in sorted order so that 2 runs on the same trees print the same bytes.
 - Exits with 0 when the trees match, 1 when they differ, 2 on an error, like `diff`.
 - On Windows, never opens the data of a cloud-only placeholder file. Such a pair is compared by size only and listed as skipped.
@@ -141,6 +142,8 @@ $ fsprobe --json --include '^budget' photos-2025 backup.zip
     }
   ],
   "left": "photos-2025",
+  "links_left": [],
+  "links_right": [],
   "match": false,
   "only_left": [],
   "only_right": [],

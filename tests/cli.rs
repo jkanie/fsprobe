@@ -280,6 +280,8 @@ fn json_shape() {
         [
             "changed",
             "left",
+            "links_left",
+            "links_right",
             "match",
             "only_left",
             "only_right",
@@ -293,6 +295,8 @@ fn json_shape() {
     assert_eq!(v["only_left"], serde_json::json!(["gone.txt"]));
     assert_eq!(v["only_right"], serde_json::json!(["added.txt"]));
     assert_eq!(v["skipped"], serde_json::json!([]));
+    assert_eq!(v["links_left"], serde_json::json!([]));
+    assert_eq!(v["links_right"], serde_json::json!([]));
     let changed = &v["changed"][0];
     assert_eq!(changed["left"], "readme.txt");
     assert_eq!(changed["reason"], "crc32");
@@ -311,6 +315,55 @@ fn json_shape() {
             "skipped": 0
         })
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn symbolic_links_are_listed_not_followed() {
+    use std::os::unix::fs::symlink;
+    let t = TempDir::new().unwrap();
+    let l = write_folder(&t.path().join("l"), BASE);
+    let r = write_folder(&t.path().join("r"), &with(&[("a.txt", b"a")]));
+    // A link to a file, a link to a folder, a link to nothing, on the left.
+    symlink("readme.txt", l.join("a.txt")).unwrap();
+    symlink("deep", l.join("docs/latest")).unwrap();
+    symlink("../missing", l.join("docs/gone")).unwrap();
+    symlink("../readme.txt", r.join("docs/readme-link")).unwrap();
+
+    let out = run2(&l, &r, &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "only in right:\n  a.txt\n\
+         symbolic links (not compared):\n\
+         \x20 left   a.txt -> readme.txt\n\
+         \x20 left   docs/gone -> ../missing\n\
+         \x20 left   docs/latest -> deep\n\
+         \x20 right  docs/readme-link -> ../readme.txt\n\
+         summary: 3 same, 0 changed, 0 only-left, 1 only-right, 0 skipped\n"
+    );
+
+    // --include and --exclude filter links like files.
+    let out = run2(&l, &r, &["--json", "--exclude", "^docs/gone$"]);
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(
+        v["links_left"],
+        serde_json::json!([
+            { "path": "a.txt", "target": "readme.txt" },
+            { "path": "docs/latest", "target": "deep" }
+        ])
+    );
+    assert_eq!(
+        v["links_right"],
+        serde_json::json!([{ "path": "docs/readme-link", "target": "../readme.txt" }])
+    );
+
+    // Links alone do not make 2 trees differ, and --quiet prints nothing.
+    let r2 = write_folder(&t.path().join("r2"), BASE);
+    symlink("readme.txt", r2.join("link")).unwrap();
+    let out = run2(&write_folder(&t.path().join("l2"), BASE), &r2, &["-q"]);
+    assert_eq!(code(&out), 0);
+    assert_eq!(stdout(&out), "");
 }
 
 #[test]
