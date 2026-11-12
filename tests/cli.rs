@@ -366,6 +366,72 @@ fn symbolic_links_are_listed_not_followed() {
     assert_eq!(stdout(&out), "");
 }
 
+#[cfg(unix)]
+#[test]
+fn follow_links_compares_what_links_point_to_and_stops_loops() {
+    use std::os::unix::fs::symlink;
+    let t = TempDir::new().unwrap();
+    let l = write_folder(&t.path().join("l"), BASE);
+    let r = write_folder(
+        &t.path().join("r"),
+        &with(&[
+            ("a.txt", b"hello\n"),
+            ("docs/latest/data.bin", &[0, 1, 2, 3, 4, 5, 6, 7]),
+        ]),
+    );
+    symlink("readme.txt", l.join("a.txt")).unwrap();
+    symlink("deep", l.join("docs/latest")).unwrap();
+    symlink("../missing", l.join("docs/gone")).unwrap();
+    // A link back to the folder that holds it, and 1 back to the root.
+    symlink(".", l.join("docs/self")).unwrap();
+    symlink("../..", l.join("docs/deep/up")).unwrap();
+
+    let out = run2(&l, &r, &["--follow-links"]);
+    assert_eq!(code(&out), 0, "{}{}", stdout(&out), stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "symbolic links (not compared):\n\
+         \x20 left   docs/deep/up -> ../..\n\
+         \x20 left   docs/gone -> ../missing\n\
+         \x20 left   docs/latest/up -> ../..\n\
+         \x20 left   docs/self -> .\n\
+         summary: 5 same, 0 changed, 0 only-left, 0 only-right, 0 skipped\n"
+    );
+
+    // A followed file is read through the link, so a change shows under both
+    // the file's own path and the link's path.
+    fs::write(l.join("readme.txt"), b"changed\n").unwrap();
+    let out = run2(&l, &r, &["--follow-links", "--json"]);
+    assert_eq!(code(&out), 1);
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let changed: Vec<_> = v["changed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["left"].clone())
+        .collect();
+    assert_eq!(
+        changed,
+        vec![serde_json::json!("a.txt"), serde_json::json!("readme.txt")]
+    );
+
+    // A link loop through 2 folders ends too.
+    let m = write_folder(&t.path().join("m"), &[("x/1.txt", b"1"), ("y/2.txt", b"2")]);
+    symlink("../y", m.join("x/to-y")).unwrap();
+    symlink("../x", m.join("y/to-x")).unwrap();
+    let out = run2(&m, &m, &["--follow-links", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["summary"]["same"], 4, "{v}");
+    assert_eq!(
+        v["links_left"],
+        serde_json::json!([
+            { "path": "x/to-y/to-x", "target": "../x" },
+            { "path": "y/to-x/to-y", "target": "../y" }
+        ])
+    );
+}
+
 #[test]
 fn missing_path_exits_2() {
     let t = TempDir::new().unwrap();

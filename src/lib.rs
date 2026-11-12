@@ -163,8 +163,16 @@ pub struct Entry {
     pub checksum: Checksum,
 }
 
-/// Lists every file in a folder or a `.zip` file.
+/// Lists every file in a folder or a `.zip` file. Symbolic links are not
+/// followed.
 pub fn list_tree(root: &Path) -> Result<Vec<Entry>, Error> {
+    list_tree_with(root, false)
+}
+
+/// Lists every file in a folder or a `.zip` file. With `follow_links`, a link
+/// inside a folder to a file lists that file under the link's path, and a link
+/// to a folder lists the folder's files below it (see [`scan_folder`]).
+pub fn list_tree_with(root: &Path, follow_links: bool) -> Result<Vec<Entry>, Error> {
     let meta = match std::fs::metadata(root) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -173,7 +181,7 @@ pub fn list_tree(root: &Path) -> Result<Vec<Entry>, Error> {
         Err(e) => return Err(io_error(root, e)),
     };
     if meta.is_dir() {
-        list_folder(root)
+        Ok(scan_folder(root, follow_links)?.0)
     } else if meta.is_file() && has_zip_extension(root) {
         list_zip(root)
     } else {
@@ -181,7 +189,7 @@ pub fn list_tree(root: &Path) -> Result<Vec<Entry>, Error> {
     }
 }
 
-/// A symbolic link inside a folder. It is listed, never followed.
+/// A symbolic link inside a folder that was not followed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
     /// Relative path with forward slashes.
@@ -193,30 +201,21 @@ pub struct Link {
 /// Lists the symbolic links in a folder, sorted by path, without following
 /// them. A zip file holds no links that the tool reads, so it gives none.
 pub fn list_links(root: &Path) -> Result<Vec<Link>, Error> {
+    list_links_with(root, false)
+}
+
+/// Lists the symbolic links in a folder that were not followed, sorted by
+/// path. Without `follow_links` that is every link. With it, that is each
+/// link that points to nothing, plus each link back into a folder that the
+/// walk is already inside (a loop).
+pub fn list_links_with(root: &Path, follow_links: bool) -> Result<Vec<Link>, Error> {
     let meta = std::fs::metadata(root).map_err(|e| io_error(root, e))?;
     if !meta.is_dir() {
         return Ok(Vec::new());
     }
-    let mut out = Vec::new();
-    for item in WalkDir::new(root).follow_links(false).min_depth(1) {
-        let item = item.map_err(|e| {
-            let path = e.path().unwrap_or(root).to_path_buf();
-            Error::Io {
-                path,
-                source: e.into(),
-            }
-        })?;
-        if !item.path_is_symlink() {
-            continue;
-        }
-        let target = std::fs::read_link(item.path()).map_err(|e| io_error(item.path(), e))?;
-        out.push(Link {
-            path: relative_path(root, item.path()),
-            target: target.to_string_lossy().into_owned(),
-        });
-    }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    let mut links = scan_folder(root, follow_links)?.1;
+    links.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(links)
 }
 
 fn has_zip_extension(path: &Path) -> bool {
@@ -224,12 +223,31 @@ fn has_zip_extension(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
 }
 
-fn list_folder(root: &Path) -> Result<Vec<Entry>, Error> {
-    let mut out = Vec::new();
+/// Lists the files of a folder and the symbolic links that it did not follow.
+///
+/// With `follow_links`, a link to a file gives an entry under the link's own
+/// path, and a link to a folder gives that folder's files below the link's
+/// path. A link to a folder that is already on its own path (the real folder
+/// of the folder that holds the link, or of any folder above it up to the
+/// root) would repeat forever, so it is listed as a link instead.
+fn scan_folder(root: &Path, follow_links: bool) -> Result<(Vec<Entry>, Vec<Link>), Error> {
+    let mut entries = Vec::new();
+    let mut links = Vec::new();
+    walk_folder(root, root, follow_links, &mut entries, &mut links)?;
+    Ok((entries, links))
+}
+
+fn walk_folder(
+    root: &Path,
+    dir: &Path,
+    follow_links: bool,
+    out: &mut Vec<Entry>,
+    links: &mut Vec<Link>,
+) -> Result<(), Error> {
     // follow_links(false) matters on Windows: walkdir then keeps the metadata
     // that came from the directory listing itself, so the attribute check
-    // below never opens a placeholder file.
-    for item in WalkDir::new(root).follow_links(false) {
+    // below never opens a placeholder file. Links are handled 1 at a time.
+    for item in WalkDir::new(dir).follow_links(false) {
         let item = item.map_err(|e| {
             let path = e.path().unwrap_or(root).to_path_buf();
             Error::Io {
@@ -237,6 +255,17 @@ fn list_folder(root: &Path) -> Result<Vec<Entry>, Error> {
                 source: e.into(),
             }
         })?;
+        if item.depth() > 0 && item.path_is_symlink() {
+            if !follow_links || !follow_link(root, item.path(), out, links)? {
+                let target =
+                    std::fs::read_link(item.path()).map_err(|e| io_error(item.path(), e))?;
+                links.push(Link {
+                    path: relative_path(root, item.path()),
+                    target: target.to_string_lossy().into_owned(),
+                });
+            }
+            continue;
+        }
         if !item.file_type().is_file() {
             continue;
         }
@@ -254,7 +283,45 @@ fn list_folder(root: &Path) -> Result<Vec<Entry>, Error> {
             checksum,
         });
     }
-    Ok(out)
+    Ok(())
+}
+
+/// Follows 1 link for [`walk_folder`]. False when the link points to nothing
+/// (or to something that is neither a file nor a folder) or would loop.
+fn follow_link(
+    root: &Path,
+    link: &Path,
+    out: &mut Vec<Entry>,
+    links: &mut Vec<Link>,
+) -> Result<bool, Error> {
+    let Ok(meta) = std::fs::metadata(link) else {
+        return Ok(false);
+    };
+    if meta.is_file() {
+        out.push(Entry {
+            path: relative_path(root, link),
+            size: meta.len(),
+            checksum: Checksum::OnDisk(link.to_path_buf()),
+        });
+        return Ok(true);
+    }
+    if !meta.is_dir() {
+        return Ok(false);
+    }
+    let real = std::fs::canonicalize(link).map_err(|e| io_error(link, e))?;
+    let mut above = link.parent();
+    while let Some(folder) = above {
+        let folder_real = std::fs::canonicalize(folder).map_err(|e| io_error(folder, e))?;
+        if folder_real == real {
+            return Ok(false);
+        }
+        if folder == root {
+            break;
+        }
+        above = folder.parent();
+    }
+    walk_folder(root, link, true, out, links)?;
+    Ok(true)
 }
 
 /// Joins the components of `path` below `root` with forward slashes.
@@ -348,6 +415,8 @@ pub struct Options {
     pub exclude: Vec<Regex>,
     /// Remove every match of each of these from the file name before pairing.
     pub pair: Vec<Regex>,
+    /// `--follow-links`: compare what each symbolic link points to.
+    pub follow_links: bool,
 }
 
 impl Options {
@@ -1098,8 +1167,16 @@ pub fn compare_trees_threads(
     threads: NonZeroUsize,
     cache: Option<&HashCache>,
 ) -> Result<Report, Error> {
-    let l = index(list_tree(left)?, options, Side::Left)?;
-    let r = index(list_tree(right)?, options, Side::Right)?;
+    let l = index(
+        list_tree_with(left, options.follow_links)?,
+        options,
+        Side::Left,
+    )?;
+    let r = index(
+        list_tree_with(right, options.follow_links)?,
+        options,
+        Side::Right,
+    )?;
     let mut report = compare_maps_cached(&l, &r, check, threads, cache)?;
     let kept = |links: Vec<Link>| -> Vec<Link> {
         links
@@ -1107,8 +1184,8 @@ pub fn compare_trees_threads(
             .filter(|l| options.keeps(&l.path))
             .collect()
     };
-    report.links_left = kept(list_links(left)?);
-    report.links_right = kept(list_links(right)?);
+    report.links_left = kept(list_links_with(left, options.follow_links)?);
+    report.links_right = kept(list_links_with(right, options.follow_links)?);
     Ok(report)
 }
 
@@ -1406,6 +1483,9 @@ Options:
   --cache FILE     Take digests of unchanged folder files from FILE, and add
                    new ones to it (created when missing).
   --threads N      Read files on at most N threads (default: 1 per CPU).
+  --follow-links   Compare what each symbolic link points to, instead of
+                   listing the link. A link to nothing, or 1 that loops,
+                   is still listed.
   --json           Print a JSON object instead of text.
   -q, --quiet      Print nothing (wins over --json). Errors still print.
   -h, --help       Print this help.
@@ -1469,6 +1549,10 @@ where
             }
             "-q" | "--quiet" if inline.is_none() => {
                 quiet = true;
+                continue;
+            }
+            "--follow-links" if inline.is_none() => {
+                options.follow_links = true;
                 continue;
             }
             "--verify" if inline.is_none() => {

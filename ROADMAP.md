@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned work after the seed, with an hour estimate per item. The total is 24.5 hours.
+Planned work after the seed, with an hour estimate per item. The total is 23.5 hours.
 
 ## 1. Nested zips, 2 hours
 
@@ -47,21 +47,16 @@ Planned work after the seed, with an hour estimate per item. The total is 24.5 h
 - What: a repeatable benchmark that builds a tree of 100,000 files plus a 10 GB zip, then times a cold run, a warm run, a run with the cache.
 - Why: speed claims need numbers. The benchmark also catches a slow-down before a release instead of after.
 
-## 10. Following symbolic links, 1 hour
-
-- What: `--follow-links` compares what each link points to instead of listing the link, guarded against link loops.
-- Why: today, a link is listed with the path it holds but never compared. When 1 side holds a link and the other side holds a copy of the file, the report cannot say whether the 2 match.
-
-## 11. BLAKE3 and verify for zip entries, 3 hours
+## 10. BLAKE3 and verify for zip entries, 3 hours
 
 - What: an option that streams each zip entry's data through the decompressor in memory (never to disk), such that `--hash blake3` and `--verify` cover zip entries too.
 - Why: today, a pair with a zip entry on either side falls back to CRC-32, because the tool never reads a zip entry's data. 2 different entries of equal size with the same CRC-32 therefore still count as the same.
 
-## 12. Release v0.1.0, 2 hours
+## 11. Release v0.1.0, 2 hours
 
 - What: write a change log, tag v0.1.0, publish binaries for the 3 platforms, publish the crate on crates.io.
 - Why: a tagged release with binaries lets people use the tool without a Rust set-up, and it gives later releases a fixed point to compare against.
 
 ## Total
 
-24.5 hours.
+23.5 hours.

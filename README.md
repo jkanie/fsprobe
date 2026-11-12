@@ -15,7 +15,7 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - With `--verify`, compares 2 folder files of equal size byte for byte and names the offset of the 1st byte that differs. It wins over `--hash`, because a byte-for-byte compare needs no hash.
 - Keeps CRC-32 for a pair with a zip entry on either side, even with `--hash blake3` or `--verify`, because the tool never extracts a zip entry.
 - Lists changed files, files only on the left, files only on the right, then a summary line with counts of same, changed, only-left, only-right, skipped files.
-- Lists each symbolic link inside a folder in its own section, with the path that the link holds. A link is never followed and never compared, so links alone do not make 2 trees differ. `--include` and `--exclude` apply to links too.
+- Lists each symbolic link inside a folder in its own section, with the path that the link holds. Without `--follow-links`, a link is never followed and never compared, so links alone do not make 2 trees differ. With it, a link to a file compares that file under the link's path, and a link to a folder compares the folder's files below the link's path. A link to nothing, or a link to a folder that is already on its own path (a loop), is still listed instead. `--include` and `--exclude` apply to links too.
 - Prints a JSON object instead of text with `--json`. Keys come out in sorted order so that 2 runs on the same trees print the same bytes.
 - Exits with 0 when the trees match, 1 when they differ, 2 on an error, like `diff`.
 - On Windows, never opens the data of a cloud-only placeholder file. Such a pair is compared by size only and listed as skipped.
@@ -70,6 +70,9 @@ Options:
   --cache FILE     Take digests of unchanged folder files from FILE, and add
                    new ones to it (created when missing).
   --threads N      Read files on at most N threads (default: 1 per CPU).
+  --follow-links   Compare what each symbolic link points to, instead of
+                   listing the link. A link to nothing, or 1 that loops,
+                   is still listed.
   --json           Print a JSON object instead of text.
   -q, --quiet      Print nothing (wins over --json). Errors still print.
   -h, --help       Print this help.
