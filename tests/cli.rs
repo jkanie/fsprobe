@@ -279,6 +279,7 @@ fn json_shape() {
         keys,
         [
             "changed",
+            "fsprobe_version",
             "left",
             "links_left",
             "links_right",
@@ -297,6 +298,12 @@ fn json_shape() {
     assert_eq!(v["skipped"], serde_json::json!([]));
     assert_eq!(v["links_left"], serde_json::json!([]));
     assert_eq!(v["links_right"], serde_json::json!([]));
+    // The version that wrote the report, the same that --version prints.
+    let version = run(&[std::ffi::OsStr::new("--version")]);
+    assert_eq!(
+        stdout(&version),
+        format!("fsprobe {}\n", v["fsprobe_version"].as_str().unwrap())
+    );
     let changed = &v["changed"][0];
     assert_eq!(changed["left"], "readme.txt");
     assert_eq!(changed["reason"], "crc32");

@@ -765,6 +765,7 @@ impl Report {
         };
         json!({
             "left": left_root,
+            "fsprobe_version": VERSION,
             "links_left": links(&self.links_left),
             "links_right": links(&self.links_right),
             "right": right_root,
@@ -2707,7 +2708,7 @@ mod tests {
             ..Report::default()
         };
         let text = serde_json::to_string(&report.to_json("L", "R")).unwrap();
-        assert!(text.starts_with(r#"{"changed":[{"left":"b","left_crc32":"00000001","left_size":1,"reason":"crc32","right":"b","right_crc32":"00000002","right_size":1}],"left":"L","links_left":[],"links_right":[],"match":false,"only_left":[]"#));
+        assert!(text.starts_with(r#"{"changed":[{"left":"b","left_crc32":"00000001","left_size":1,"reason":"crc32","right":"b","right_crc32":"00000002","right_size":1}],"fsprobe_version":"0.1.0","left":"L","links_left":[],"links_right":[],"match":false,"only_left":[]"#));
     }
 
     // -----------------------------------------------------------------------

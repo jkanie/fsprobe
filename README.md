@@ -147,6 +147,7 @@ $ fsprobe --json --include '^budget' photos-2025 backup.zip
       "right_size": 18
     }
   ],
+  "fsprobe_version": "0.1.0",
   "left": "photos-2025",
   "links_left": [],
   "links_right": [],

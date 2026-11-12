@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned work after the seed, with an hour estimate per item. The total is 23.5 hours.
+Planned work after the seed, with an hour estimate per item. The total is 30.5 hours.
 
 ## 1. Nested zips, 2 hours
 
@@ -57,6 +57,26 @@ Planned work after the seed, with an hour estimate per item. The total is 23.5 h
 - What: write a change log, tag v0.1.0, publish binaries for the 3 platforms, publish the crate on crates.io.
 - Why: a tagged release with binaries lets people use the tool without a Rust set-up, and it gives later releases a fixed point to compare against.
 
+## 12. Exclude and include lists from a file, 1.5 hours
+
+- What: `--exclude-from FILE` and `--include-from FILE` read 1 regex per line, with blank lines and `#` comments left out, and add them to `--exclude` and `--include`.
+- Why: a back-up compare often skips the same long list of build and cache folders. Today each one is a separate `--exclude` on the command line.
+
+## 13. JUnit XML report for CI, 2 hours
+
+- What: `--junit FILE` writes each pair as a test case: a same pair passes, a changed or 1-sided file fails with its sizes and checksums, a skipped pair is skipped.
+- Why: CI systems such as GitHub Actions, GitLab, Jenkins show JUnit results file by file, so a release check that compares a build folder with a known-good tree gets a readable result.
+
+## 14. Progress on stderr for long runs, 1.5 hours
+
+- What: when stderr is a terminal, a 1-line progress note (files and bytes read of the total, the rate) that updates in place. `-q` and `--json` keep it off, and it never goes to stdout.
+- Why: a compare of a 10 GB tree prints nothing for minutes today, so a user cannot tell a slow drive from a stuck run.
+
+## 15. Compare by modified time without reading data, 2 hours
+
+- What: `--by-mtime SECONDS` counts a pair of equal size as the same when the modified times differ by at most SECONDS, and reads no data for it. FAT keeps times to 2 seconds, so 2 is the useful value there.
+- Why: a full read of a large back-up takes hours. A quick size-and-time pass finds the likely changes 1st, and a full compare can follow on those only.
+
 ## Total
 
-23.5 hours.
+30.5 hours.
