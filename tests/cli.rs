@@ -881,6 +881,40 @@ fn threads_flag_gives_the_same_report() {
 }
 
 #[test]
+fn summary_prints_only_the_counts_and_keeps_the_exit_code() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let same = write_folder(&tmp.path().join("same"), BASE);
+    let r = write_folder(&tmp.path().join("r"), &with(&[("readme.txt", b"HELLO\n")]));
+    for flags in [&["-s"][..], &["--summary"]] {
+        let full = run2(&l, &r, &[]);
+        let out = run2(&l, &r, flags);
+        assert_eq!(code(&out), 1, "{flags:?}");
+        // The last line of the full report, alone.
+        assert_eq!(
+            stdout(&out),
+            stdout(&full).lines().last().unwrap().to_string() + "\n"
+        );
+        assert!(stdout(&out).starts_with("summary: "), "{}", stdout(&out));
+        assert_eq!(code(&run2(&l, &same, flags)), 0, "{flags:?}");
+    }
+    // --json and --quiet win.
+    let json = run2(&l, &r, &["--json"]);
+    assert_eq!(
+        stdout(&run2(&l, &r, &["--summary", "--json"])),
+        stdout(&json)
+    );
+    assert_eq!(stdout(&run2(&l, &r, &["--summary", "--quiet"])), "");
+    // With --cache, the cache line follows the summary.
+    let cache = tmp.path().join("digests.json");
+    let out = run2(&l, &r, &["--summary", "--cache", cache.to_str().unwrap()]);
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[1].starts_with("cache: "), "{text}");
+}
+
+#[test]
 fn quiet_prints_nothing_and_keeps_the_exit_code() {
     let tmp = TempDir::new().unwrap();
     let l = write_folder(&tmp.path().join("l"), BASE);

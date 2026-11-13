@@ -1459,6 +1459,8 @@ pub struct Args {
     pub json: bool,
     /// `--quiet`: print nothing, the exit code alone gives the result.
     pub quiet: bool,
+    /// `--summary`: print only the summary line of the text report.
+    pub summary: bool,
     pub options: Options,
     pub check: Check,
     /// The digest cache file of `--cache`.
@@ -1498,6 +1500,7 @@ Options:
                    listing the link. A link to nothing, or 1 that loops,
                    is still listed.
   --json           Print a JSON object instead of text.
+  -s, --summary    Print only the summary line (--json wins).
   -q, --quiet      Print nothing (wins over --json). Errors still print.
   -h, --help       Print this help.
   -V, --version    Print the version.
@@ -1524,6 +1527,7 @@ where
     let mut positional: Vec<OsString> = Vec::new();
     let mut json = false;
     let mut quiet = false;
+    let mut summary = false;
     let mut check = Check::default();
     let mut options = Options::default();
     let mut cache: Option<PathBuf> = None;
@@ -1560,6 +1564,10 @@ where
             }
             "-q" | "--quiet" if inline.is_none() => {
                 quiet = true;
+                continue;
+            }
+            "-s" | "--summary" if inline.is_none() => {
+                summary = true;
                 continue;
             }
             "--follow-links" if inline.is_none() => {
@@ -1650,6 +1658,7 @@ where
             right: PathBuf::from(right),
             json,
             quiet,
+            summary,
             options,
             check,
             cache,
@@ -1723,6 +1732,17 @@ where
         }
         let text = serde_json::to_string_pretty(&value).expect("a JSON value always serializes");
         writeln!(out, "{text}").map_err(stdout_error)?;
+    } else if args.summary {
+        writeln!(out, "{}", report.summary_line()).map_err(stdout_error)?;
+        if let Some(cache) = &cache {
+            writeln!(
+                out,
+                "cache: {} from the cache, {} read",
+                cache.hits(),
+                cache.reads()
+            )
+            .map_err(stdout_error)?;
+        }
     } else {
         out.write_all(report.to_text().as_bytes())
             .map_err(stdout_error)?;
@@ -2950,6 +2970,24 @@ mod tests {
         assert!(!a.quiet);
         assert!(matches!(
             parse_args(os(&["--quiet=1", "L", "R"])),
+            Err(Error::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn summary_option_is_parsed() {
+        for args in [vec!["-s", "L", "R"], vec!["L", "R", "--summary"]] {
+            let Command::Compare(a) = parse_args(os(&args)).unwrap() else {
+                panic!("expected a compare");
+            };
+            assert!(a.summary, "{args:?}");
+        }
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(!a.summary);
+        assert!(matches!(
+            parse_args(os(&["--summary=1", "L", "R"])),
             Err(Error::Usage(_))
         ));
     }
