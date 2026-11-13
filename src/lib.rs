@@ -1680,7 +1680,8 @@ where
         Ok(code) => code,
         Err(e) => {
             let _ = writeln!(err, "{BIN}: {e}");
-            if matches!(e, Error::Usage(_)) {
+            // A pattern that does not compile is a bad option value too, so it gets the same hint.
+            if matches!(e, Error::Usage(_) | Error::BadRegex { .. }) {
                 let _ = writeln!(err, "Try '{BIN} --help' for more information.");
             }
             EXIT_ERROR

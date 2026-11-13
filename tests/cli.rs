@@ -511,9 +511,20 @@ fn usage_errors_exit_2() {
     assert_eq!(code(&out), 2);
     assert!(stderr(&out).contains("expected 2 paths"));
 
-    let out = run(&["--pair".as_ref(), "(".as_ref(), "a".as_ref(), "b".as_ref()]);
-    assert_eq!(code(&out), 2);
-    assert!(stderr(&out).contains("invalid --pair pattern"));
+    let hint = "Try 'fsprobe --help' for more information.\n";
+    assert!(stderr(&out).ends_with(hint), "{}", stderr(&out));
+
+    // A pattern that does not compile ends with the same hint, for each of the 3 options that take 1.
+    for flag in ["--pair", "--include", "--exclude"] {
+        let out = run(&[flag.as_ref(), "(".as_ref(), "a".as_ref(), "b".as_ref()]);
+        assert_eq!(code(&out), 2);
+        let err = stderr(&out);
+        assert!(
+            err.contains(&format!("invalid {flag} pattern '('")),
+            "{err}"
+        );
+        assert!(err.ends_with(hint), "{err}");
+    }
 }
 
 #[test]
