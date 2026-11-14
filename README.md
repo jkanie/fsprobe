@@ -7,6 +7,7 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - Walks each folder recursively.
 - Reads each zip file from its central directory only (names, sizes, stored CRC-32 values), with no entry ever extracted. Folder entries inside a zip are skipped.
 - Pairs files by relative path, written with forward slashes on every platform.
+- With `--max-depth N`, compares only the paths at most N levels deep on both sides, links included. `--max-depth 1` compares only the files at the top of each folder or zip. Deeper files are still listed by the walk, but never read.
 - Marks a pair as changed when the sizes differ, without reading either file.
 - Compares every size before it reads any file. It then reads only the files of the pairs whose sizes match, on as many threads as `std::thread::available_parallelism` reports for the process (or `--threads N`), never more threads than reads.
 - Prints the same report for any thread count. Each list keeps the same order, whichever thread ends 1st. On a read error, the run names the same file as a run on 1 thread.
@@ -65,6 +66,8 @@ Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
+  --max-depth N    Compare only paths at most N levels deep (1: only the
+                   files at the top of each side).
   --ignore-case    Pair paths that differ only in letter case, such as a
                    Windows copy of a Linux tree.
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.

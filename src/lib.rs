@@ -419,11 +419,19 @@ pub struct Options {
     pub follow_links: bool,
     /// `--ignore-case`: pair paths that differ only in letter case.
     pub ignore_case: bool,
+    /// `--max-depth`: keep only paths with at most this many components.
+    pub max_depth: Option<NonZeroUsize>,
 }
 
 impl Options {
-    /// True when `path` passes the include and exclude filters.
+    /// True when `path` passes the depth, include and exclude filters.
     pub fn keeps(&self, path: &str) -> bool {
+        if let Some(depth) = self.max_depth {
+            // `path` is relative with forward slashes, so "a/b.txt" is 2 deep.
+            if path.split('/').count() > depth.get() {
+                return false;
+            }
+        }
         if self.exclude.iter().any(|re| re.is_match(path)) {
             return false;
         }
@@ -1489,6 +1497,8 @@ Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
+  --max-depth N    Compare only paths at most N levels deep (1: only the
+                   files at the top of each side).
   --ignore-case    Pair paths that differ only in letter case, such as a
                    Windows copy of a Linux tree.
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.
@@ -1626,6 +1636,21 @@ where
                 threads = Some(value.parse::<NonZeroUsize>().map_err(|_| {
                     Error::Usage(format!(
                         "--threads needs a whole number of 1 or more, got '{value}'"
+                    ))
+                })?);
+                continue;
+            }
+            "--max-depth" => {
+                let value = match inline {
+                    Some(v) => v,
+                    None => match args.next() {
+                        Some(v) => v.to_string_lossy().into_owned(),
+                        None => return Err(Error::Usage("--max-depth needs an N value".into())),
+                    },
+                };
+                options.max_depth = Some(value.parse::<NonZeroUsize>().map_err(|_| {
+                    Error::Usage(format!(
+                        "--max-depth needs a whole number of 1 or more, got '{value}'"
                     ))
                 })?);
                 continue;
@@ -1827,6 +1852,52 @@ mod tests {
         };
         assert!(o.keeps("docs/b.txt"));
         assert!(!o.keeps("tmp/b.txt"));
+    }
+
+    #[test]
+    fn max_depth_counts_path_components() {
+        let o = Options {
+            max_depth: NonZeroUsize::new(2),
+            ..Options::default()
+        };
+        assert!(o.keeps("a.txt"));
+        assert!(o.keeps("docs/b.txt"));
+        assert!(!o.keeps("docs/deep/c.txt"));
+        let top = Options {
+            max_depth: NonZeroUsize::new(1),
+            include: vec![re(r"^docs/")],
+            ..Options::default()
+        };
+        assert!(!top.keeps("docs/b.txt"));
+        assert!(!top.keeps("a.txt"));
+    }
+
+    #[test]
+    fn parses_max_depth() {
+        for (args, depth) in [
+            (vec!["--max-depth", "1", "L", "R"], 1),
+            (vec!["--max-depth=3", "L", "R"], 3),
+            (vec!["L", "R", "--max-depth", "2"], 2),
+        ] {
+            let Ok(Command::Compare(parsed)) = parse_args(os(&args)) else {
+                panic!("{args:?}");
+            };
+            assert_eq!(
+                parsed.options.max_depth,
+                NonZeroUsize::new(depth),
+                "{args:?}"
+            );
+        }
+        assert!(
+            matches!(parse_args(os(&["L", "R", "--max-depth"])), Err(Error::Usage(m)) if m == "--max-depth needs an N value")
+        );
+        for bad in ["0", "-1", "x", ""] {
+            let flag = format!("--max-depth={bad}");
+            assert!(
+                matches!(parse_args(os(&[flag.as_str(), "L", "R"])), Err(Error::Usage(m)) if m == format!("--max-depth needs a whole number of 1 or more, got '{bad}'")),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

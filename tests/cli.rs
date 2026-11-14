@@ -946,3 +946,30 @@ fn quiet_prints_nothing_and_keeps_the_exit_code() {
     assert_eq!(stdout(&out), "");
     assert!(!stderr(&out).is_empty());
 }
+
+#[test]
+fn max_depth_leaves_deeper_files_out_on_both_sides() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let changed = with(&[("docs/deep/data.bin", &[9, 9]), ("docs/new.txt", b"x\n")]);
+    let r = write_folder(&tmp.path().join("r"), &changed);
+    let z = write_zip(&tmp.path().join("r.zip"), &changed);
+    for right in [&r, &z] {
+        let out = run2(&l, right, &["--max-depth", "1"]);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+        assert_eq!(
+            stdout(&out),
+            "summary: 1 same, 0 changed, 0 only-left, 0 only-right, 0 skipped\n"
+        );
+        let out = run2(&l, right, &["--max-depth=2"]);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        assert!(stdout(&out)
+            .ends_with("summary: 2 same, 0 changed, 0 only-left, 1 only-right, 0 skipped\n"));
+        let out = run2(&l, right, &["--max-depth", "3"]);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        assert!(stdout(&out)
+            .ends_with("summary: 2 same, 1 changed, 0 only-left, 1 only-right, 0 skipped\n"));
+    }
+    let out = run2(&l, &r, &["--max-depth", "0"]);
+    assert_eq!(code(&out), 2);
+}
