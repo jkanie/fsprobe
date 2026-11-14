@@ -7,6 +7,7 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - Walks each folder recursively.
 - Reads each zip file from its central directory only (names, sizes, stored CRC-32 values), with no entry ever extracted. Folder entries inside a zip are skipped.
 - Pairs files by relative path, written with forward slashes on every platform.
+- With `--list-same`, lists the files that are the same too, under `same:` before the changed ones, and as a `same` list in JSON, for a record of what was checked.
 - With `--max-depth N`, compares only the paths at most N levels deep on both sides, links included. `--max-depth 1` compares only the files at the top of each folder or zip. Deeper files are still listed by the walk, but never read.
 - Marks a pair as changed when the sizes differ, without reading either file.
 - Compares every size before it reads any file. It then reads only the files of the pairs whose sizes match, on as many threads as `std::thread::available_parallelism` reports for the process (or `--threads N`), never more threads than reads.
@@ -78,6 +79,8 @@ Options:
   --follow-links   Compare what each symbolic link points to, instead of
                    listing the link. A link to nothing, or 1 that loops,
                    is still listed.
+  --list-same      List the files that are the same too, before the
+                   changed ones (in JSON, the same list).
   --json           Print a JSON object instead of text.
   -s, --summary    Print only the summary line (--json wins).
   -q, --quiet      Print nothing (wins over --json). Errors still print.

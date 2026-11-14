@@ -1469,6 +1469,8 @@ pub struct Args {
     pub quiet: bool,
     /// `--summary`: print only the summary line of the text report.
     pub summary: bool,
+    /// `--list-same`: list the same pairs too, in text and in JSON.
+    pub list_same: bool,
     pub options: Options,
     pub check: Check,
     /// The digest cache file of `--cache`.
@@ -1509,6 +1511,8 @@ Options:
   --follow-links   Compare what each symbolic link points to, instead of
                    listing the link. A link to nothing, or 1 that loops,
                    is still listed.
+  --list-same      List the files that are the same too, before the
+                   changed ones (in JSON, the same list).
   --json           Print a JSON object instead of text.
   -s, --summary    Print only the summary line (--json wins).
   -q, --quiet      Print nothing (wins over --json). Errors still print.
@@ -1538,6 +1542,7 @@ where
     let mut json = false;
     let mut quiet = false;
     let mut summary = false;
+    let mut list_same = false;
     let mut check = Check::default();
     let mut options = Options::default();
     let mut cache: Option<PathBuf> = None;
@@ -1578,6 +1583,10 @@ where
             }
             "-s" | "--summary" if inline.is_none() => {
                 summary = true;
+                continue;
+            }
+            "--list-same" if inline.is_none() => {
+                list_same = true;
                 continue;
             }
             "--follow-links" if inline.is_none() => {
@@ -1684,6 +1693,7 @@ where
             json,
             quiet,
             summary,
+            list_same,
             options,
             check,
             cache,
@@ -1749,6 +1759,13 @@ where
             &args.left.display().to_string(),
             &args.right.display().to_string(),
         );
+        if args.list_same {
+            value["same"] = json!(report
+                .same
+                .iter()
+                .map(|p| json!({ "left": p.left, "right": p.right }))
+                .collect::<Vec<_>>());
+        }
         if let Some(cache) = &cache {
             value["cache"] = json!({
                 "file": args.cache.as_ref().map(|p| p.display().to_string()),
@@ -1770,6 +1787,13 @@ where
             .map_err(stdout_error)?;
         }
     } else {
+        if args.list_same && !report.same.is_empty() {
+            let mut same = String::from("same:\n");
+            for p in &report.same {
+                same.push_str(&format!("  {}\n", p.label()));
+            }
+            out.write_all(same.as_bytes()).map_err(stdout_error)?;
+        }
         out.write_all(report.to_text().as_bytes())
             .map_err(stdout_error)?;
         if let Some(cache) = &cache {
@@ -3026,6 +3050,20 @@ mod tests {
                 matches!(parse_args(os(&args)), Err(Error::Usage(m)) if m == "--cache needs a FILE value")
             );
         }
+    }
+
+    #[test]
+    fn list_same_option_is_parsed() {
+        for args in [vec!["--list-same", "L", "R"], vec!["L", "R", "--list-same"]] {
+            let Command::Compare(a) = parse_args(os(&args)).unwrap() else {
+                panic!("expected a compare");
+            };
+            assert!(a.list_same, "{args:?}");
+        }
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(!a.list_same);
     }
 
     #[test]

@@ -973,3 +973,50 @@ fn max_depth_leaves_deeper_files_out_on_both_sides() {
     let out = run2(&l, &r, &["--max-depth", "0"]);
     assert_eq!(code(&out), 2);
 }
+
+#[test]
+fn list_same_prints_the_same_pairs_first() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let changed = with(&[("readme.txt", b"hello, world\n")]);
+    let r = write_folder(&tmp.path().join("r"), &changed);
+    let z = write_zip(&tmp.path().join("r.zip"), &changed);
+    for right in [&r, &z] {
+        let plain = stdout(&run2(&l, right, &[]));
+        let out = run2(&l, right, &["--list-same"]);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        // The same pairs come 1st, in pairing-key order, then the report as before.
+        assert_eq!(
+            stdout(&out),
+            format!("same:\n  docs/deep/data.bin\n  docs/notes.txt\n{plain}")
+        );
+        let v: Value =
+            serde_json::from_str(&stdout(&run2(&l, right, &["--json", "--list-same"]))).unwrap();
+        assert_eq!(
+            v["same"],
+            serde_json::json!([
+                {"left": "docs/deep/data.bin", "right": "docs/deep/data.bin"},
+                {"left": "docs/notes.txt", "right": "docs/notes.txt"}
+            ])
+        );
+        let v: Value = serde_json::from_str(&stdout(&run2(&l, right, &["--json"]))).unwrap();
+        assert!(v.get("same").is_none());
+        // --summary and --quiet still win.
+        assert_eq!(
+            stdout(&run2(&l, right, &["--list-same", "-s"])),
+            "summary: 2 same, 1 changed, 0 only-left, 0 only-right, 0 skipped\n"
+        );
+        assert_eq!(stdout(&run2(&l, right, &["--list-same", "-q"])), "");
+    }
+    // With nothing the same, no "same:" heading.
+    let other = write_folder(&tmp.path().join("o"), &[("x.txt", b"x\n")]);
+    assert!(!stdout(&run2(&l, &other, &["--list-same"])).contains("same:\n"));
+    assert_eq!(
+        code(&run(&[
+            "--list-same=1".as_ref(),
+            l.as_os_str(),
+            r.as_os_str()
+        ])),
+        2
+    );
+}
