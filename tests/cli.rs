@@ -1127,3 +1127,23 @@ fn skip_hidden_drops_dot_folders_and_dot_files() {
         stderr(&out)
     );
 }
+
+#[test]
+fn exit_zero_reports_a_difference_but_exits_0() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));
+    let r = write_folder(&tmp.path().join("r"), &with(&[("a.txt", b"2")]));
+    let plain = run2(&l, &r, &[]);
+    assert_eq!(code(&plain), 1, "{}", stderr(&plain));
+    // The same report, in text and in JSON, with exit 0.
+    let out = run2(&l, &r, &["--exit-zero"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), stdout(&plain));
+    let json = run2(&l, &r, &["--json", "--exit-zero"]);
+    assert_eq!(code(&json), 0, "{}", stderr(&json));
+    assert_eq!(stdout(&json), stdout(&run2(&l, &r, &["--json"])));
+    // A match still exits 0, and an error still exits 2.
+    assert_eq!(code(&run2(&l, &l, &["--exit-zero"])), 0);
+    let missing = run2(&l, &tmp.path().join("nope"), &["--exit-zero"]);
+    assert_eq!(code(&missing), 2, "{}", stderr(&missing));
+}

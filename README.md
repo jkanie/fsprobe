@@ -90,10 +90,13 @@ Options:
   --json           Print a JSON object instead of text.
   -s, --summary    Print only the summary line (--json wins).
   -q, --quiet      Print nothing (wins over --json). Errors still print.
+  --exit-zero      Exit 0 when the trees differ too, such as in a CI step
+                   that only reports. An error still exits 2.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
-Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
+Exit status: 0 when the trees match, 1 when they differ (0 with
+--exit-zero), 2 on an error.
 ```
 
 - `--include` and `--exclude` match against the relative path, such as `docs/notes.txt`.

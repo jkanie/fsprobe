@@ -1476,6 +1476,8 @@ pub struct Args {
     pub summary: bool,
     /// `--list-same`: list the same pairs too, in text and in JSON.
     pub list_same: bool,
+    /// `--exit-zero`: exit 0 when the trees differ too. An error still exits 2.
+    pub exit_zero: bool,
     pub options: Options,
     pub check: Check,
     /// The digest cache file of `--cache`.
@@ -1526,10 +1528,13 @@ Options:
   --json           Print a JSON object instead of text.
   -s, --summary    Print only the summary line (--json wins).
   -q, --quiet      Print nothing (wins over --json). Errors still print.
+  --exit-zero      Exit 0 when the trees differ too, such as in a CI step
+                   that only reports. An error still exits 2.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
-Exit status: 0 when the trees match, 1 when they differ, 2 on an error.
+Exit status: 0 when the trees match, 1 when they differ (0 with
+--exit-zero), 2 on an error.
 "
     )
 }
@@ -1553,6 +1558,7 @@ where
     let mut quiet = false;
     let mut summary = false;
     let mut list_same = false;
+    let mut exit_zero = false;
     let mut check = Check::default();
     let mut options = Options::default();
     let mut cache: Option<PathBuf> = None;
@@ -1597,6 +1603,10 @@ where
             }
             "--list-same" if inline.is_none() => {
                 list_same = true;
+                continue;
+            }
+            "--exit-zero" if inline.is_none() => {
+                exit_zero = true;
                 continue;
             }
             "--follow-links" if inline.is_none() => {
@@ -1732,6 +1742,7 @@ where
             quiet,
             summary,
             list_same,
+            exit_zero,
             options,
             check,
             cache,
@@ -1845,7 +1856,7 @@ where
         }
     }
     out.flush().map_err(stdout_error)?;
-    Ok(if report.matches() {
+    Ok(if report.matches() || args.exit_zero {
         EXIT_MATCH
     } else {
         EXIT_DIFFER
@@ -3117,6 +3128,24 @@ mod tests {
             panic!("expected a compare");
         };
         assert!(!a.list_same);
+    }
+
+    #[test]
+    fn exit_zero_option_is_parsed() {
+        for args in [vec!["--exit-zero", "L", "R"], vec!["L", "R", "--exit-zero"]] {
+            let Command::Compare(a) = parse_args(os(&args)).unwrap() else {
+                panic!("expected a compare");
+            };
+            assert!(a.exit_zero, "{args:?}");
+        }
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(!a.exit_zero);
+        assert!(matches!(
+            parse_args(os(&["--exit-zero=1", "L", "R"])),
+            Err(Error::Usage(m)) if m.contains("--exit-zero=1")
+        ));
     }
 
     #[test]
