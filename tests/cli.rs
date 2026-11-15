@@ -1076,3 +1076,54 @@ fn exclude_from_reads_1_pattern_per_line() {
     assert_eq!(code(&out), 2);
     assert!(stderr(&out).contains("--exclude-from"), "{}", stderr(&out));
 }
+
+#[test]
+fn skip_hidden_drops_dot_folders_and_dot_files() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(
+        &tmp.path().join("l"),
+        &with(&[(".git/HEAD", b"ref: main\n"), ("docs/.DS_Store", b"a")]),
+    );
+    let r = write_folder(
+        &tmp.path().join("r"),
+        &with(&[(".git/HEAD", b"ref: other\n"), ("docs/deep/.cache", b"b")]),
+    );
+    let z = write_zip(
+        &tmp.path().join("r.zip"),
+        &with(&[(".git/HEAD", b"ref: zip\n"), (".env", b"c")]),
+    );
+    // Without the option, the dot paths differ on each side.
+    let out = run2(&l, &r, &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert!(
+        stdout(&out)
+            .ends_with("summary: 3 same, 1 changed, 1 only-left, 1 only-right, 0 skipped\n"),
+        "{}",
+        stdout(&out)
+    );
+    // With it, only the 3 files of BASE are left on each side, in a folder and in a zip.
+    for right in [&r, &z] {
+        let out = run2(&l, right, &["--skip-hidden"]);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+        assert_eq!(
+            stdout(&out),
+            "summary: 3 same, 0 changed, 0 only-left, 0 only-right, 0 skipped\n"
+        );
+    }
+    // It wins over an --include that names a dot path.
+    let out = run2(&l, &r, &["--skip-hidden", "--include", r"^\.git/"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(
+        stdout(&out)
+            .ends_with("summary: 0 same, 0 changed, 0 only-left, 0 only-right, 0 skipped\n"),
+        "{}",
+        stdout(&out)
+    );
+    let out = run2(&l, &r, &["--skip-hidden=yes"]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("unknown option '--skip-hidden=yes'"),
+        "{}",
+        stderr(&out)
+    );
+}

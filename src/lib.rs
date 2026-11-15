@@ -421,11 +421,16 @@ pub struct Options {
     pub ignore_case: bool,
     /// `--max-depth`: keep only paths with at most this many components.
     pub max_depth: Option<NonZeroUsize>,
+    /// `--skip-hidden`: drop paths with a folder or file-name that starts with a dot.
+    pub skip_hidden: bool,
 }
 
 impl Options {
-    /// True when `path` passes the depth, include and exclude filters.
+    /// True when `path` passes the depth, hidden, include and exclude filters.
     pub fn keeps(&self, path: &str) -> bool {
+        if self.skip_hidden && path.split('/').any(|part| part.starts_with('.')) {
+            return false;
+        }
         if let Some(depth) = self.max_depth {
             // `path` is relative with forward slashes, so "a/b.txt" is 2 deep.
             if path.split('/').count() > depth.get() {
@@ -1506,6 +1511,8 @@ Options:
                    files at the top of each side).
   --ignore-case    Pair paths that differ only in letter case, such as a
                    Windows copy of a Linux tree.
+  --skip-hidden    Drop paths with a folder or file-name that starts with a
+                   dot, such as .git/ or .DS_Store (wins over --include).
   --hash NAME      crc32 (the default) or blake3, for 2 folder files.
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
@@ -1598,6 +1605,10 @@ where
             }
             "--ignore-case" if inline.is_none() => {
                 options.ignore_case = true;
+                continue;
+            }
+            "--skip-hidden" if inline.is_none() => {
+                options.skip_hidden = true;
                 continue;
             }
             "--verify" if inline.is_none() => {
@@ -1892,6 +1903,21 @@ mod tests {
         };
         assert!(o.keeps("a/b.txt"));
         assert!(!o.keeps("a/b.jpg"));
+    }
+
+    #[test]
+    fn skip_hidden_drops_any_part_that_starts_with_a_dot() {
+        let o = Options {
+            include: vec![re(r"\.txt$")],
+            skip_hidden: true,
+            ..Options::default()
+        };
+        assert!(o.keeps("docs/b.txt"));
+        assert!(o.keeps("docs/b.c.txt"));
+        assert!(!o.keeps(".notes.txt"));
+        assert!(!o.keeps(".git/b.txt"));
+        assert!(!o.keeps("a/.cache/deep/b.txt"));
+        assert!(Options::default().keeps("a/.cache/b.txt"));
     }
 
     #[test]

@@ -57,10 +57,10 @@ Planned work after the seed, with an hour estimate per item. The total is 30.5 h
 - What: write a change log, tag v0.1.0, publish binaries for the 3 platforms, publish the crate on crates.io.
 - Why: a tagged release with binaries lets people use the tool without a Rust set-up, and it gives later releases a fixed point to compare against.
 
-## 12. Exclude and include lists from a file, 1.5 hours
+## 12. Include list from a file, 0.5 hours
 
-- What: `--exclude-from FILE` and `--include-from FILE` read 1 regex per line, with blank lines and `#` comments left out, and add them to `--exclude` and `--include`.
-- Why: a back-up compare often skips the same long list of build and cache folders. Today each one is a separate `--exclude` on the command line.
+- What: `--include-from FILE` reads 1 regex per line, with blank lines and `#` comments left out, and adds them to `--include`, as `--exclude-from` does for `--exclude`.
+- Why: a compare of only the files a release ships (1 pattern per folder) needs a long list of `--include` options today.
 
 ## 13. JUnit XML report for CI, 2 hours
 
@@ -76,6 +76,11 @@ Planned work after the seed, with an hour estimate per item. The total is 30.5 h
 
 - What: `--by-mtime SECONDS` counts a pair of equal size as the same when the modified times differ by at most SECONDS, and reads no data for it. FAT keeps times to 2 seconds, so 2 is the useful value there.
 - Why: a full read of a large back-up takes hours. A quick size-and-time pass finds the likely changes 1st, and a full compare can follow on those only.
+
+## 16. Shell completions, 1 hour
+
+- What: `fsprobe --completions SHELL` prints a completion script for bash, zsh, fish, PowerShell, with the options and their values (the 2 `--hash` names, files for `--cache` and `--exclude-from`).
+- Why: the tool has 18 options, and a completion script saves looking each one up in `--help`.
 
 ## Total
 
