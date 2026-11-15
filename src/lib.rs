@@ -1498,6 +1498,9 @@ Files pair up by relative path and compare by size, then CRC-32.
 Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
+  --exclude-from FILE
+                   Read --exclude patterns from FILE, 1 per line (blank
+                   lines and lines that start with # are skipped).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
   --max-depth N    Compare only paths at most N levels deep (1: only the
                    files at the top of each side).
@@ -1662,6 +1665,30 @@ where
                         "--max-depth needs a whole number of 1 or more, got '{value}'"
                     ))
                 })?);
+                continue;
+            }
+            "--exclude-from" => {
+                let path = match inline {
+                    Some(v) => PathBuf::from(v),
+                    None => match args.next() {
+                        Some(v) => PathBuf::from(v),
+                        None => {
+                            return Err(Error::Usage("--exclude-from needs a FILE value".into()))
+                        }
+                    },
+                };
+                let text = std::fs::read_to_string(&path).map_err(|e| {
+                    Error::Usage(format!(
+                        "--exclude-from cannot read {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                // 1 pattern per line, as for --exclude. Blank lines and lines that start with # are skipped.
+                for line in text.lines().map(str::trim) {
+                    if !line.is_empty() && !line.starts_with('#') {
+                        options.exclude.push(compile("--exclude-from", line)?);
+                    }
+                }
                 continue;
             }
             "--include" => "--include",

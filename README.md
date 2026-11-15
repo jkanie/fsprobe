@@ -7,6 +7,7 @@ A command-line tool that compares 2 trees of files. Each side is a folder or a `
 - Walks each folder recursively.
 - Reads each zip file from its central directory only (names, sizes, stored CRC-32 values), with no entry ever extracted. Folder entries inside a zip are skipped.
 - Pairs files by relative path, written with forward slashes on every platform.
+- With `--exclude-from FILE`, reads `--exclude` patterns from a file, 1 per line, such that a team can keep its list of build folders and caches in the repo. Blank lines and lines that start with `#` are skipped.
 - With `--list-same`, lists the files that are the same too, under `same:` before the changed ones, and as a `same` list in JSON, for a record of what was checked.
 - With `--max-depth N`, compares only the paths at most N levels deep on both sides, links included. `--max-depth 1` compares only the files at the top of each folder or zip. Deeper files are still listed by the walk, but never read.
 - Marks a pair as changed when the sizes differ, without reading either file.
@@ -66,6 +67,9 @@ Files pair up by relative path and compare by size, then CRC-32.
 Options:
   --include REGEX  Keep only paths that match (repeatable).
   --exclude REGEX  Drop paths that match, wins over --include (repeatable).
+  --exclude-from FILE
+                   Read --exclude patterns from FILE, 1 per line (blank
+                   lines and lines that start with # are skipped).
   --pair REGEX     Remove matches from file-names before pairing (repeatable).
   --max-depth N    Compare only paths at most N levels deep (1: only the
                    files at the top of each side).

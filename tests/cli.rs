@@ -1020,3 +1020,59 @@ fn list_same_prints_the_same_pairs_first() {
         2
     );
 }
+
+#[test]
+fn exclude_from_reads_1_pattern_per_line() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), BASE);
+    let changed = with(&[
+        ("docs/notes.txt", b"other\n"),
+        ("readme.txt", b"hello, world\n"),
+    ]);
+    let r = write_folder(&tmp.path().join("r"), &changed);
+    let list = tmp.path().join("ignore.txt");
+    fs::write(
+        &list,
+        "# build output and notes\n\n  ^docs/notes\\.txt$  \n\\.bin$\n",
+    )
+    .unwrap();
+    for flag in [
+        vec!["--exclude-from".to_string(), list.display().to_string()],
+        vec![format!("--exclude-from={}", list.display())],
+    ] {
+        let flags: Vec<&str> = flag.iter().map(String::as_str).collect();
+        let out = run2(&l, &r, &flags);
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        // Only readme.txt is left to compare: the comment, the blank line, the spaces around a pattern count for nothing.
+        assert!(
+            stdout(&out)
+                .ends_with("summary: 0 same, 1 changed, 0 only-left, 0 only-right, 0 skipped\n"),
+            "{}",
+            stdout(&out)
+        );
+    }
+    // It adds to --exclude, so the last changed file can go too.
+    let out = run2(
+        &l,
+        &r,
+        &[
+            "--exclude-from",
+            &list.display().to_string(),
+            "--exclude",
+            "^readme",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let missing = tmp.path().join("missing.txt");
+    let out = run2(&l, &r, &["--exclude-from", &missing.display().to_string()]);
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("--exclude-from cannot read"),
+        "{}",
+        stderr(&out)
+    );
+    fs::write(&list, "(\n").unwrap();
+    let out = run2(&l, &r, &["--exclude-from", &list.display().to_string()]);
+    assert_eq!(code(&out), 2);
+    assert!(stderr(&out).contains("--exclude-from"), "{}", stderr(&out));
+}
