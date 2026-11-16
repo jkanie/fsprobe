@@ -681,6 +681,15 @@ impl Report {
         self.changed.is_empty() && self.only_left.is_empty()
     }
 
+    /// True when no pair changed and each file on 1 side only is allowed:
+    /// those only in right with `allow_extra`, those only in left with
+    /// `allow_missing`. With neither, this is [`Report::matches`].
+    pub fn passes(&self, allow_extra: bool, allow_missing: bool) -> bool {
+        self.changed.is_empty()
+            && (allow_extra || self.only_right.is_empty())
+            && (allow_missing || self.only_left.is_empty())
+    }
+
     /// The summary line, as printed at the end of the text report.
     pub fn summary_line(&self) -> String {
         format!(
@@ -1489,6 +1498,8 @@ pub struct Args {
     pub exit_zero: bool,
     /// `--allow-extra`: files only in right do not make the exit status 1.
     pub allow_extra: bool,
+    /// `--allow-missing`: files only in left do not make the exit status 1.
+    pub allow_missing: bool,
     /// `--output FILE`: write the report to FILE instead of stdout.
     pub output: Option<PathBuf>,
     pub options: Options,
@@ -1566,6 +1577,9 @@ Options:
   --allow-extra    Exit 0 when the only difference is files only in RIGHT,
                    such as a back-up that keeps old files. They are still
                    listed.
+  --allow-missing  Exit 0 when the only difference is files only in LEFT,
+                   such as a copy that left some files out. They are still
+                   listed. With --allow-extra, both kinds pass.
   -o, --output FILE
                    Write the report to FILE (created or replaced) instead
                    of stdout. With --quiet, no file is written.
@@ -1573,8 +1587,8 @@ Options:
   -V, --version    Print the version.
 
 Exit status: 0 when the trees match, 1 when they differ (0 with
---exit-zero, or with --allow-extra when only RIGHT has more), 2 on an
-error.
+--exit-zero, with --allow-extra when only RIGHT has more, or with
+--allow-missing when only LEFT has more), 2 on an error.
 "
     )
 }
@@ -1600,6 +1614,7 @@ where
     let mut list_same = false;
     let mut exit_zero = false;
     let mut allow_extra = false;
+    let mut allow_missing = false;
     let mut output: Option<PathBuf> = None;
     let mut check = Check::default();
     let mut options = Options::default();
@@ -1653,6 +1668,10 @@ where
             }
             "--allow-extra" if inline.is_none() => {
                 allow_extra = true;
+                continue;
+            }
+            "--allow-missing" if inline.is_none() => {
+                allow_missing = true;
                 continue;
             }
             "--follow-links" if inline.is_none() => {
@@ -1804,6 +1823,7 @@ where
             list_same,
             exit_zero,
             allow_extra,
+            allow_missing,
             output,
             options,
             check,
@@ -1936,7 +1956,7 @@ where
         }
     }
     out.flush().map_err(stdout_error)?;
-    let passes = report.matches() || (args.allow_extra && report.covers_left());
+    let passes = report.passes(args.allow_extra, args.allow_missing);
     Ok(if passes || args.exit_zero {
         EXIT_MATCH
     } else {
@@ -3221,6 +3241,62 @@ mod tests {
             panic!("expected a compare");
         };
         assert!(!a.allow_extra);
+    }
+
+    #[test]
+    fn passes_allows_each_side_only_when_asked() {
+        let only_left = Report {
+            only_left: vec!["a".into()],
+            ..Report::default()
+        };
+        let only_right = Report {
+            only_right: vec!["b".into()],
+            ..Report::default()
+        };
+        let both = Report {
+            only_left: vec!["a".into()],
+            only_right: vec!["b".into()],
+            ..Report::default()
+        };
+        let changed = Report {
+            changed: vec![Changed {
+                pair: Pair {
+                    left: "c".into(),
+                    right: "c".into(),
+                },
+                left_size: 1,
+                right_size: 2,
+                reason: Reason::Size,
+            }],
+            ..Report::default()
+        };
+        // (allow_extra, allow_missing) -> passes, for each report.
+        let flags = [(false, false), (true, false), (false, true), (true, true)];
+        let cases = [
+            (&Report::default(), [true, true, true, true]),
+            (&only_left, [false, false, true, true]),
+            (&only_right, [false, true, false, true]),
+            (&both, [false, false, false, true]),
+            (&changed, [false, false, false, false]),
+        ];
+        for (report, want) in cases {
+            for ((extra, missing), want) in flags.iter().zip(want) {
+                assert_eq!(report.passes(*extra, *missing), want, "{extra} {missing}");
+            }
+            assert_eq!(report.passes(false, false), report.matches());
+        }
+    }
+
+    #[test]
+    fn allow_missing_option_is_parsed() {
+        let Command::Compare(a) = parse_args(os(&["L", "--allow-missing", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(a.allow_missing && !a.allow_extra && !a.exit_zero);
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(!a.allow_missing);
     }
 
     #[test]

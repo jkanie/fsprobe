@@ -1188,6 +1188,44 @@ fn allow_extra_lets_only_right_files_pass() {
 }
 
 #[test]
+fn allow_missing_lets_only_left_files_pass() {
+    let tmp = TempDir::new().unwrap();
+    let full = write_folder(
+        &tmp.path().join("full"),
+        &with(&[("a.txt", b"1"), ("big.iso", b"9")]),
+    );
+    let part = write_folder(&tmp.path().join("part"), &with(&[("a.txt", b"1")]));
+    // Without it, a file only in left is a difference.
+    let plain = run2(&full, &part, &[]);
+    assert_eq!(code(&plain), 1, "{}", stderr(&plain));
+    // With it, the report is the same and still lists the file, but the run passes.
+    let out = run2(&full, &part, &["--allow-missing"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), stdout(&plain));
+    assert!(stdout(&out).contains("big.iso"), "{}", stdout(&out));
+    // A file only in right still exits 1, unless --allow-extra is given too.
+    let more = write_folder(
+        &tmp.path().join("more"),
+        &with(&[("a.txt", b"1"), ("new.txt", b"5")]),
+    );
+    assert_eq!(code(&run2(&full, &more, &["--allow-missing"])), 1);
+    let both = run2(&full, &more, &["--allow-missing", "--allow-extra"]);
+    assert_eq!(code(&both), 0, "{}", stderr(&both));
+    // A changed file still exits 1.
+    let changed = write_folder(&tmp.path().join("changed"), &with(&[("a.txt", b"2")]));
+    assert_eq!(
+        code(&run2(
+            &full,
+            &changed,
+            &["--allow-missing", "--allow-extra"]
+        )),
+        1
+    );
+    let bad = run2(&full, &part, &["--allow-missing=1"]);
+    assert_eq!(code(&bad), 2, "{}", stderr(&bad));
+}
+
+#[test]
 fn output_writes_the_report_to_a_file() {
     let tmp = TempDir::new().unwrap();
     let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));

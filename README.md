@@ -96,6 +96,9 @@ Options:
   --allow-extra    Exit 0 when the only difference is files only in RIGHT,
                    such as a back-up that keeps old files. They are still
                    listed.
+  --allow-missing  Exit 0 when the only difference is files only in LEFT,
+                   such as a copy that left some files out. They are still
+                   listed. With --allow-extra, both kinds pass.
   -o, --output FILE
                    Write the report to FILE (created or replaced) instead
                    of stdout. With --quiet, no file is written.
@@ -103,8 +106,8 @@ Options:
   -V, --version    Print the version.
 
 Exit status: 0 when the trees match, 1 when they differ (0 with
---exit-zero, or with --allow-extra when only RIGHT has more), 2 on an
-error.
+--exit-zero, with --allow-extra when only RIGHT has more, or with
+--allow-missing when only LEFT has more), 2 on an error.
 ```
 
 - `--include` and `--exclude` match against the relative path, such as `docs/notes.txt`.
@@ -120,6 +123,7 @@ error.
 - `-q` or `--quiet` prints nothing, for a script that needs only the exit status (0 when the trees match, 1 when they differ). It wins over `--json`. An error still prints its message to stderr and exits with 2. A `--cache` file is still saved.
 - `-s` or `--summary` prints only the summary line (plus the `cache:` line with `--cache`), for a log that needs the counts without every path. The exit status is the same. `--json` and `--quiet` win over it.
 - `--allow-extra` checks a back-up that keeps files its source has since deleted: files only in RIGHT are still listed and counted, but they alone do not make the exit status 1. A changed file or a file only in LEFT still does. `--exit-zero` wins over it. The JSON `match` field still says whether the trees match.
+- `--allow-missing` is the same for files only in LEFT, such as a copy that left out the large files on purpose: they are still listed and counted, but they alone do not make the exit status 1. With `--allow-extra` as well, files on 1 side only pass in both directions, and only a changed file makes the exit status 1. `--exit-zero` wins over it too.
 - `-o FILE` or `--output FILE` writes the report (text, `--summary`, `--json`) to FILE instead of stdout, such as to keep it as a CI artifact. FILE is created or replaced once the comparison is done, so a run that fails writes no file and keeps an older 1 as it was. The exit status is the same as without it. With `--quiet`, no file is written.
 - `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning back-up drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
 - `FSPROBE_THREADS=N` in the environment sets that default, such as once for every run of a CI job. `--threads` wins over it, and an empty value counts as unset. A value that is not a whole number of 1 or more stops the run with exit status 2.
