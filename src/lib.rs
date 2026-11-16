@@ -15,6 +15,7 @@
 //! cache takes its CRC-32 or BLAKE3 digest from there instead of being read.
 
 use std::collections::btree_map::{BTreeMap, Entry as MapEntry};
+use std::env;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, Metadata};
@@ -1508,6 +1509,23 @@ pub enum Command {
     Version,
 }
 
+/// The thread count that `FSPROBE_THREADS` sets, for when `--threads` is not
+/// given, such as on every run of a CI job. Unset or empty means no setting.
+fn env_threads() -> Result<Option<NonZeroUsize>, Error> {
+    let Some(value) = env::var_os("FSPROBE_THREADS") else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value.parse::<NonZeroUsize>().map(Some).map_err(|_| {
+        Error::Usage(format!(
+            "FSPROBE_THREADS needs a whole number of 1 or more, got '{value}'"
+        ))
+    })
+}
+
 /// The `--help` text.
 pub fn usage() -> String {
     format!(
@@ -1533,7 +1551,8 @@ Options:
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
                    new ones to it (created when missing).
-  --threads N      Read files on at most N threads (default: 1 per CPU).
+  --threads N      Read files on at most N threads (default: FSPROBE_THREADS
+                   if set, else 1 per CPU).
   --follow-links   Compare what each symbolic link points to, instead of
                    listing the link. A link to nothing, or 1 that loops,
                    is still listed.
@@ -1839,7 +1858,10 @@ where
         &args.right,
         &args.options,
         args.check,
-        args.threads.unwrap_or_else(default_threads),
+        match args.threads {
+            Some(n) => n,
+            None => env_threads()?.unwrap_or_else(default_threads),
+        },
         cache.as_ref(),
     )?;
     if let Some(cache) = &cache {

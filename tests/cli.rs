@@ -1247,3 +1247,47 @@ fn output_errors_leave_no_file_and_exit_2() {
         stderr(&none)
     );
 }
+
+#[test]
+fn fsprobe_threads_sets_the_default_thread_count() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(
+        &tmp.path().join("l"),
+        &with(&[("a.txt", b"1"), ("b.txt", b"2")]),
+    );
+    let r = write_folder(
+        &tmp.path().join("r"),
+        &with(&[("a.txt", b"1"), ("b.txt", b"3")]),
+    );
+    let with_env = |value: &str, extra: &[&str]| {
+        Command::new(BIN)
+            .env("FSPROBE_THREADS", value)
+            .args(extra)
+            .arg(&l)
+            .arg(&r)
+            .output()
+            .unwrap()
+    };
+    // The report is the same whatever the count, and --threads wins over the variable.
+    let plain = run2(&l, &r, &[]);
+    for out in [
+        with_env("1", &[]),
+        with_env("", &[]),
+        with_env("zero", &["--threads", "2"]),
+    ] {
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        assert_eq!(stdout(&out), stdout(&plain));
+    }
+    // A bad value stops the run, naming the variable.
+    for bad in ["0", "zero", "-3"] {
+        let out = with_env(bad, &[]);
+        assert_eq!(code(&out), 2);
+        assert!(
+            stderr(&out).contains(&format!(
+                "FSPROBE_THREADS needs a whole number of 1 or more, got '{bad}'"
+            )),
+            "{}",
+            stderr(&out)
+        );
+    }
+}

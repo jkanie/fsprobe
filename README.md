@@ -81,7 +81,8 @@ Options:
   --verify         Compare 2 folder files byte for byte, wins over --hash.
   --cache FILE     Take digests of unchanged folder files from FILE, and add
                    new ones to it (created when missing).
-  --threads N      Read files on at most N threads (default: 1 per CPU).
+  --threads N      Read files on at most N threads (default: FSPROBE_THREADS
+                   if set, else 1 per CPU).
   --follow-links   Compare what each symbolic link points to, instead of
                    listing the link. A link to nothing, or 1 that loops,
                    is still listed.
@@ -121,6 +122,7 @@ error.
 - `--allow-extra` checks a back-up that keeps files its source has since deleted: files only in RIGHT are still listed and counted, but they alone do not make the exit status 1. A changed file or a file only in LEFT still does. `--exit-zero` wins over it. The JSON `match` field still says whether the trees match.
 - `-o FILE` or `--output FILE` writes the report (text, `--summary`, `--json`) to FILE instead of stdout, such as to keep it as a CI artifact. FILE is created or replaced once the comparison is done, so a run that fails writes no file and keeps an older 1 as it was. The exit status is the same as without it. With `--quiet`, no file is written.
 - `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning back-up drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
+- `FSPROBE_THREADS=N` in the environment sets that default, such as once for every run of a CI job. `--threads` wins over it, and an empty value counts as unset. A value that is not a whole number of 1 or more stops the run with exit status 2.
 - `--cache FILE` keeps the CRC-32 and BLAKE3 digests of folder files in a JSON file, keyed by absolute path with the size and the modified time-stamp in nanoseconds. A re-run takes the digest of each file whose size and time-stamp did not change from that file, so a 2nd run over the same backup drive reads only the files that changed. See [Digest cache](#digest-cache).
 
 ## Digest cache
