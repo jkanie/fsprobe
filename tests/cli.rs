@@ -1147,3 +1147,64 @@ fn exit_zero_reports_a_difference_but_exits_0() {
     let missing = run2(&l, &tmp.path().join("nope"), &["--exit-zero"]);
     assert_eq!(code(&missing), 2, "{}", stderr(&missing));
 }
+
+#[test]
+fn output_writes_the_report_to_a_file() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));
+    let r = write_folder(&tmp.path().join("r"), &with(&[("a.txt", b"2")]));
+    let plain = run2(&l, &r, &[]);
+    // The file holds what stdout would, stdout stays empty and the exit code is the same.
+    let file = tmp.path().join("report.txt");
+    let out = run2(&l, &r, &["-o", file.to_str().unwrap()]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(fs::read_to_string(&file).unwrap(), stdout(&plain));
+    // --output=FILE replaces an earlier file, here with the JSON report.
+    let json = run2(&l, &r, &["--json", &format!("--output={}", file.display())]);
+    assert_eq!(code(&json), 1, "{}", stderr(&json));
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        stdout(&run2(&l, &r, &["--json"]))
+    );
+    // --quiet writes no file.
+    let quiet = tmp.path().join("quiet.txt");
+    let q = run2(&l, &r, &["-q", "-o", quiet.to_str().unwrap()]);
+    assert_eq!(code(&q), 1, "{}", stderr(&q));
+    assert!(!quiet.exists());
+}
+
+#[test]
+fn output_errors_leave_no_file_and_exit_2() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));
+    // A failed comparison writes no report file.
+    let file = tmp.path().join("report.txt");
+    let missing = run2(
+        &l,
+        &tmp.path().join("nope"),
+        &["--output", file.to_str().unwrap()],
+    );
+    assert_eq!(code(&missing), 2, "{}", stderr(&missing));
+    assert!(!file.exists());
+    // A file that cannot be created is an error that names it.
+    let bad = tmp.path().join("no-such-folder").join("report.txt");
+    let out = run2(&l, &l, &["-o", bad.to_str().unwrap()]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(stderr(&out).contains("no-such-folder"), "{}", stderr(&out));
+    // An empty or a missing value is a usage error.
+    let empty = run2(&l, &l, &["--output="]);
+    assert_eq!(code(&empty), 2);
+    assert!(
+        stderr(&empty).contains("--output needs a FILE value"),
+        "{}",
+        stderr(&empty)
+    );
+    let none = run(&[l.as_os_str(), l.as_os_str(), "-o".as_ref()]);
+    assert_eq!(code(&none), 2);
+    assert!(
+        stderr(&none).contains("-o needs a FILE value"),
+        "{}",
+        stderr(&none)
+    );
+}

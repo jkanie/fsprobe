@@ -92,6 +92,9 @@ Options:
   -q, --quiet      Print nothing (wins over --json). Errors still print.
   --exit-zero      Exit 0 when the trees differ too, such as in a CI step
                    that only reports. An error still exits 2.
+  -o, --output FILE
+                   Write the report to FILE (created or replaced) instead
+                   of stdout. With --quiet, no file is written.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
@@ -111,6 +114,7 @@ Exit status: 0 when the trees match, 1 when they differ (0 with
 - In the JSON report, a pair changed under `--hash blake3` has `"reason": "blake3"` with `left_blake3` and `right_blake3`. A pair changed under `--verify` has `"reason": "bytes"` with `offset`.
 - `-q` or `--quiet` prints nothing, for a script that needs only the exit status (0 when the trees match, 1 when they differ). It wins over `--json`. An error still prints its message to stderr and exits with 2. A `--cache` file is still saved.
 - `-s` or `--summary` prints only the summary line (plus the `cache:` line with `--cache`), for a log that needs the counts without every path. The exit status is the same. `--json` and `--quiet` win over it.
+- `-o FILE` or `--output FILE` writes the report (text, `--summary`, `--json`) to FILE instead of stdout, such as to keep it as a CI artifact. FILE is created or replaced once the comparison is done, so a run that fails writes no file and keeps an older 1 as it was. The exit status is the same as without it. With `--quiet`, no file is written.
 - `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning back-up drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
 - `--cache FILE` keeps the CRC-32 and BLAKE3 digests of folder files in a JSON file, keyed by absolute path with the size and the modified time-stamp in nanoseconds. A re-run takes the digest of each file whose size and time-stamp did not change from that file, so a 2nd run over the same backup drive reads only the files that changed. See [Digest cache](#digest-cache).
 

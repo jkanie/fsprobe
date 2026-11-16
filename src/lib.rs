@@ -171,7 +171,8 @@ pub fn list_tree(root: &Path) -> Result<Vec<Entry>, Error> {
 
 /// Lists every file in a folder or a `.zip` file. With `follow_links`, a link
 /// inside a folder to a file lists that file under the link's path, and a link
-/// to a folder lists the folder's files below it (see [`scan_folder`]).
+/// to a folder lists the folder's files below it. [`list_links_with`] lists
+/// the links that are not followed: 1 to nothing, or 1 that loops.
 pub fn list_tree_with(root: &Path, follow_links: bool) -> Result<Vec<Entry>, Error> {
     let meta = match std::fs::metadata(root) {
         Ok(meta) => meta,
@@ -1478,6 +1479,8 @@ pub struct Args {
     pub list_same: bool,
     /// `--exit-zero`: exit 0 when the trees differ too. An error still exits 2.
     pub exit_zero: bool,
+    /// `--output FILE`: write the report to FILE instead of stdout.
+    pub output: Option<PathBuf>,
     pub options: Options,
     pub check: Check,
     /// The digest cache file of `--cache`.
@@ -1530,6 +1533,9 @@ Options:
   -q, --quiet      Print nothing (wins over --json). Errors still print.
   --exit-zero      Exit 0 when the trees differ too, such as in a CI step
                    that only reports. An error still exits 2.
+  -o, --output FILE
+                   Write the report to FILE (created or replaced) instead
+                   of stdout. With --quiet, no file is written.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
@@ -1559,6 +1565,7 @@ where
     let mut summary = false;
     let mut list_same = false;
     let mut exit_zero = false;
+    let mut output: Option<PathBuf> = None;
     let mut check = Check::default();
     let mut options = Options::default();
     let mut cache: Option<PathBuf> = None;
@@ -1658,6 +1665,20 @@ where
                 cache = Some(PathBuf::from(value));
                 continue;
             }
+            "-o" | "--output" => {
+                let value = match inline {
+                    Some(v) => OsString::from(v),
+                    None => match args.next() {
+                        Some(v) => v,
+                        None => return Err(Error::Usage(format!("{flag} needs a FILE value"))),
+                    },
+                };
+                if value.is_empty() {
+                    return Err(Error::Usage(format!("{flag} needs a FILE value")));
+                }
+                output = Some(PathBuf::from(value));
+                continue;
+            }
             "--threads" => {
                 let value = match inline {
                     Some(v) => v,
@@ -1743,6 +1764,7 @@ where
             summary,
             list_same,
             exit_zero,
+            output,
             options,
             check,
             cache,
@@ -1777,13 +1799,14 @@ fn try_run<I>(args: I, out: &mut dyn Write) -> Result<i32, Error>
 where
     I: IntoIterator<Item = OsString>,
 {
-    let stdout_error = |e| io_error(Path::new("<stdout>"), e);
     let args = match parse_args(args)? {
         Command::Help => {
+            let stdout_error = |e| io_error(Path::new("<stdout>"), e);
             out.write_all(usage().as_bytes()).map_err(stdout_error)?;
             return Ok(EXIT_MATCH);
         }
         Command::Version => {
+            let stdout_error = |e| io_error(Path::new("<stdout>"), e);
             writeln!(out, "{BIN} {VERSION}").map_err(stdout_error)?;
             return Ok(EXIT_MATCH);
         }
@@ -1801,6 +1824,20 @@ where
     if let Some(cache) = &cache {
         cache.save()?;
     }
+    // The report goes to stdout, or to the --output file. The file is opened only once the
+    // comparison is done, such that an error leaves no empty report behind.
+    let target = match &args.output {
+        Some(path) if !args.quiet => path.as_path(),
+        _ => Path::new("<stdout>"),
+    };
+    let stdout_error = |e| io_error(target, e);
+    let mut file;
+    let out: &mut dyn Write = if args.quiet || args.output.is_none() {
+        out
+    } else {
+        file = io::BufWriter::new(File::create(target).map_err(stdout_error)?);
+        &mut file
+    };
     if args.quiet {
         // Nothing to print: the exit code (0 match, 1 differ) is the answer.
     } else if args.json {
