@@ -673,6 +673,13 @@ impl Report {
         self.changed.is_empty() && self.only_left.is_empty() && self.only_right.is_empty()
     }
 
+    /// True when every left file is on the right and the same: no pair changed
+    /// and no file is only in left. Files only in right do not count, as for a
+    /// back-up that may hold more than its source.
+    pub fn covers_left(&self) -> bool {
+        self.changed.is_empty() && self.only_left.is_empty()
+    }
+
     /// The summary line, as printed at the end of the text report.
     pub fn summary_line(&self) -> String {
         format!(
@@ -1479,6 +1486,8 @@ pub struct Args {
     pub list_same: bool,
     /// `--exit-zero`: exit 0 when the trees differ too. An error still exits 2.
     pub exit_zero: bool,
+    /// `--allow-extra`: files only in right do not make the exit status 1.
+    pub allow_extra: bool,
     /// `--output FILE`: write the report to FILE instead of stdout.
     pub output: Option<PathBuf>,
     pub options: Options,
@@ -1535,6 +1544,9 @@ Options:
   -q, --quiet      Print nothing (wins over --json). Errors still print.
   --exit-zero      Exit 0 when the trees differ too, such as in a CI step
                    that only reports. An error still exits 2.
+  --allow-extra    Exit 0 when the only difference is files only in RIGHT,
+                   such as a back-up that keeps old files. They are still
+                   listed.
   -o, --output FILE
                    Write the report to FILE (created or replaced) instead
                    of stdout. With --quiet, no file is written.
@@ -1542,7 +1554,8 @@ Options:
   -V, --version    Print the version.
 
 Exit status: 0 when the trees match, 1 when they differ (0 with
---exit-zero), 2 on an error.
+--exit-zero, or with --allow-extra when only RIGHT has more), 2 on an
+error.
 "
     )
 }
@@ -1567,6 +1580,7 @@ where
     let mut summary = false;
     let mut list_same = false;
     let mut exit_zero = false;
+    let mut allow_extra = false;
     let mut output: Option<PathBuf> = None;
     let mut check = Check::default();
     let mut options = Options::default();
@@ -1616,6 +1630,10 @@ where
             }
             "--exit-zero" if inline.is_none() => {
                 exit_zero = true;
+                continue;
+            }
+            "--allow-extra" if inline.is_none() => {
+                allow_extra = true;
                 continue;
             }
             "--follow-links" if inline.is_none() => {
@@ -1766,6 +1784,7 @@ where
             summary,
             list_same,
             exit_zero,
+            allow_extra,
             output,
             options,
             check,
@@ -1895,7 +1914,8 @@ where
         }
     }
     out.flush().map_err(stdout_error)?;
-    Ok(if report.matches() || args.exit_zero {
+    let passes = report.matches() || (args.allow_extra && report.covers_left());
+    Ok(if passes || args.exit_zero {
         EXIT_MATCH
     } else {
         EXIT_DIFFER
@@ -3167,6 +3187,18 @@ mod tests {
             panic!("expected a compare");
         };
         assert!(!a.list_same);
+    }
+
+    #[test]
+    fn allow_extra_option_is_parsed() {
+        let Command::Compare(a) = parse_args(os(&["L", "--allow-extra", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(a.allow_extra && !a.exit_zero);
+        let Command::Compare(a) = parse_args(os(&["L", "R"])).unwrap() else {
+            panic!("expected a compare");
+        };
+        assert!(!a.allow_extra);
     }
 
     #[test]

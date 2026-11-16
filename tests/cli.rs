@@ -1149,6 +1149,45 @@ fn exit_zero_reports_a_difference_but_exits_0() {
 }
 
 #[test]
+fn allow_extra_lets_only_right_files_pass() {
+    let tmp = TempDir::new().unwrap();
+    let src = write_folder(&tmp.path().join("src"), &with(&[("a.txt", b"1")]));
+    let bak = write_folder(
+        &tmp.path().join("bak"),
+        &with(&[("a.txt", b"1"), ("old.txt", b"9")]),
+    );
+    // Without it, a file only in right is a difference.
+    let plain = run2(&src, &bak, &[]);
+    assert_eq!(code(&plain), 1, "{}", stderr(&plain));
+    // With it, the report is the same and still lists the file, but the run passes.
+    let out = run2(&src, &bak, &["--allow-extra"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), stdout(&plain));
+    assert!(stdout(&out).contains("old.txt"), "{}", stdout(&out));
+    // The JSON report still says the trees do not match.
+    let json = run2(&src, &bak, &["--json", "--allow-extra"]);
+    assert_eq!(code(&json), 0, "{}", stderr(&json));
+    assert!(
+        stdout(&json).contains("\"match\": false"),
+        "{}",
+        stdout(&json)
+    );
+    // A file only in left, or a changed file, still exits 1.
+    assert_eq!(code(&run2(&bak, &src, &["--allow-extra"])), 1);
+    let changed = write_folder(
+        &tmp.path().join("changed"),
+        &with(&[("a.txt", b"2"), ("old.txt", b"9")]),
+    );
+    assert_eq!(code(&run2(&src, &changed, &["--allow-extra"])), 1);
+    assert_eq!(
+        code(&run2(&src, &changed, &["--allow-extra", "--exit-zero"])),
+        0
+    );
+    let bad = run2(&src, &bak, &["--allow-extra=1"]);
+    assert_eq!(code(&bad), 2, "{}", stderr(&bad));
+}
+
+#[test]
 fn output_writes_the_report_to_a_file() {
     let tmp = TempDir::new().unwrap();
     let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));
