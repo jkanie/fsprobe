@@ -1489,10 +1489,12 @@ pub struct Args {
     pub threads: Option<NonZeroUsize>,
 }
 
-/// What the command line asks for.
+/// What the command line asks for. Args is boxed: with --output it holds 4
+/// paths, which on Windows made Compare at least 232 bytes, over the 200 of
+/// clippy's large_enum_variant check.
 #[derive(Debug)]
 pub enum Command {
-    Compare(Args),
+    Compare(Box<Args>),
     Help,
     Version,
 }
@@ -1756,7 +1758,7 @@ where
     }
 
     match <[OsString; 2]>::try_from(positional) {
-        Ok([left, right]) => Ok(Command::Compare(Args {
+        Ok([left, right]) => Ok(Command::Compare(Box::new(Args {
             left: PathBuf::from(left),
             right: PathBuf::from(right),
             json,
@@ -1769,7 +1771,7 @@ where
             check,
             cache,
             threads,
-        })),
+        }))),
         Err(got) => Err(Error::Usage(format!(
             "expected 2 paths (LEFT RIGHT), got {}",
             got.len()
@@ -1810,7 +1812,7 @@ where
             writeln!(out, "{BIN} {VERSION}").map_err(stdout_error)?;
             return Ok(EXIT_MATCH);
         }
-        Command::Compare(args) => args,
+        Command::Compare(args) => *args,
     };
     let cache = args.cache.as_deref().map(HashCache::load).transpose()?;
     let report = compare_trees_threads(
