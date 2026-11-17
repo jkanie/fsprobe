@@ -1252,6 +1252,42 @@ fn output_writes_the_report_to_a_file() {
 }
 
 #[test]
+fn output_dash_is_stdout() {
+    let tmp = TempDir::new().unwrap();
+    let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));
+    let r = write_folder(&tmp.path().join("r"), &with(&[("a.txt", b"2")]));
+    let plain = run2(&l, &r, &[]);
+    // "-o -" and "--output=-" print to stdout and create no file named "-".
+    for args in [&["-o", "-"][..], &["--output=-"][..]] {
+        let out = Command::new(BIN)
+            .current_dir(tmp.path())
+            .args(args)
+            .arg(&l)
+            .arg(&r)
+            .output()
+            .unwrap();
+        assert_eq!(code(&out), 1, "{}", stderr(&out));
+        assert_eq!(stdout(&out), stdout(&plain));
+        assert!(!tmp.path().join("-").exists());
+    }
+    // A later "-o -" undoes an earlier --output FILE, and the other way round.
+    let file = tmp.path().join("report.txt");
+    let undone = run2(&l, &r, &["-o", file.to_str().unwrap(), "-o", "-"]);
+    assert_eq!(stdout(&undone), stdout(&plain));
+    assert!(!file.exists());
+    let redone = run2(&l, &r, &["-o", "-", "-o", file.to_str().unwrap()]);
+    assert_eq!(stdout(&redone), "");
+    assert_eq!(fs::read_to_string(&file).unwrap(), stdout(&plain));
+    // A file named "-" is still reached by a path.
+    let dashed = run2(&l, &r, &["-o", tmp.path().join("-").to_str().unwrap()]);
+    assert_eq!(stdout(&dashed), "");
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("-")).unwrap(),
+        stdout(&plain)
+    );
+}
+
+#[test]
 fn output_errors_leave_no_file_and_exit_2() {
     let tmp = TempDir::new().unwrap();
     let l = write_folder(&tmp.path().join("l"), &with(&[("a.txt", b"1")]));

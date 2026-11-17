@@ -1500,7 +1500,7 @@ pub struct Args {
     pub allow_extra: bool,
     /// `--allow-missing`: files only in left do not make the exit status 1.
     pub allow_missing: bool,
-    /// `--output FILE`: write the report to FILE instead of stdout.
+    /// `--output FILE`: write the report to FILE instead of stdout. `-` is stdout, so it is None.
     pub output: Option<PathBuf>,
     pub options: Options,
     pub check: Check,
@@ -1582,7 +1582,8 @@ Options:
                    listed. With --allow-extra, both kinds pass.
   -o, --output FILE
                    Write the report to FILE (created or replaced) instead
-                   of stdout. With --quiet, no file is written.
+                   of stdout. With --quiet, no file is written. A FILE of
+                   - is stdout, such as to undo an earlier --output.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
@@ -1734,7 +1735,8 @@ where
                 if value.is_empty() {
                     return Err(Error::Usage(format!("{flag} needs a FILE value")));
                 }
-                output = Some(PathBuf::from(value));
+                // "-" is stdout, as for most tools. A later --output wins, so "-o -" undoes an earlier one.
+                output = (value != "-").then(|| PathBuf::from(value));
                 continue;
             }
             "--threads" => {

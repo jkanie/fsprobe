@@ -101,7 +101,8 @@ Options:
                    listed. With --allow-extra, both kinds pass.
   -o, --output FILE
                    Write the report to FILE (created or replaced) instead
-                   of stdout. With --quiet, no file is written.
+                   of stdout. With --quiet, no file is written. A FILE of
+                   - is stdout, such as to undo an earlier --output.
   -h, --help       Print this help.
   -V, --version    Print the version.
 
@@ -124,7 +125,7 @@ Exit status: 0 when the trees match, 1 when they differ (0 with
 - `-s` or `--summary` prints only the summary line (plus the `cache:` line with `--cache`), for a log that needs the counts without every path. The exit status is the same. `--json` and `--quiet` win over it.
 - `--allow-extra` checks a back-up that keeps files its source has since deleted: files only in RIGHT are still listed and counted, but they alone do not make the exit status 1. A changed file or a file only in LEFT still does. `--exit-zero` wins over it. The JSON `match` field still says whether the trees match.
 - `--allow-missing` is the same for files only in LEFT, such as a copy that left out the large files on purpose: they are still listed and counted, but they alone do not make the exit status 1. With `--allow-extra` as well, files on 1 side only pass in both directions, and only a changed file makes the exit status 1. `--exit-zero` wins over it too.
-- `-o FILE` or `--output FILE` writes the report (text, `--summary`, `--json`) to FILE instead of stdout, such as to keep it as a CI artifact. FILE is created or replaced once the comparison is done, so a run that fails writes no file and keeps an older 1 as it was. The exit status is the same as without it. With `--quiet`, no file is written.
+- `-o FILE` or `--output FILE` writes the report (text, `--summary`, `--json`) to FILE instead of stdout, such as to keep it as a CI artifact. FILE is created or replaced once the comparison is done, so a run that fails writes no file and keeps an older 1 as it was. The exit status is the same as without it. With `--quiet`, no file is written. `-o -` is stdout, as for most tools, and the last `--output` wins, so `-o -` at the end undoes an `--output` given earlier, such as in a shell alias. A file named `-` is still reached by a path, such as `-o ./-`.
 - `--threads N` caps the reads at N threads, such as `--threads 1` to read 1 file at a time from a spinning back-up drive or a network share. The default is the count that `std::thread::available_parallelism` reports. The report is the same for every N.
 - `FSPROBE_THREADS=N` in the environment sets that default, such as once for every run of a CI job. `--threads` wins over it, and an empty value counts as unset. A value that is not a whole number of 1 or more stops the run with exit status 2.
 - `--cache FILE` keeps the CRC-32 and BLAKE3 digests of folder files in a JSON file, keyed by absolute path with the size and the modified time-stamp in nanoseconds. A re-run takes the digest of each file whose size and time-stamp did not change from that file, so a 2nd run over the same backup drive reads only the files that changed. See [Digest cache](#digest-cache).
